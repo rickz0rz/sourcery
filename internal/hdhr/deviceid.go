@@ -11,9 +11,9 @@ import (
 // that fail it, so an emulated device needs a synthetic ID that validates.
 //
 // The algorithm is from libhdhomerun: XOR the nibbles, passing every other one
-// through a substitution table, and a valid ID reduces to zero. Verified
-// against both real devices on this network (1234ABC2 and ABCDEF01 pass;
-// single-nibble corruptions of each fail).
+// through a substitution table, and a valid ID reduces to zero. It was verified
+// against IDs read from working hardware, which validated, and against
+// single-nibble corruptions of them, which did not.
 var deviceIDLookup = [16]uint32{
 	0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB,
 	0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0,

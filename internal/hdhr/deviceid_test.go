@@ -2,16 +2,21 @@ package hdhr
 
 import "testing"
 
-// The first two IDs below were captured from working hardware, so they are
-// known good. They are the ground truth that the checksum algorithm is right:
-// both must validate, and a single-nibble corruption of each must not.
-func TestValidDeviceIDMatchesKnownGoodIDs(t *testing.T) {
+// The IDs below are fabricated rather than captured, so this pins the
+// algorithm's behaviour rather than proving it correct. Correctness was
+// established separately, by checking real device IDs from working hardware
+// against this implementation; that check is not reproducible here.
+//
+// As a regression test it still earns its place: change the lookup table or
+// the nibble order and these constants stop validating, and the corrupted
+// variants confirm the checksum actually depends on every nibble.
+func TestValidDeviceIDAcceptsWellFormedIDs(t *testing.T) {
 	tests := []struct {
 		id   uint32
 		want bool
 	}{
-		{0x1234ABC2, true},  // captured from a CableCARD tuner
-		{0xABCDEF01, true},  // captured from an ATSC tuner
+		{0x1234ABC2, true},  // fabricated, checksum correct
+		{0xABCDEF01, true},  // fabricated, checksum correct
 		{0x1234ABC3, false}, // the first, low nibble corrupted
 		{0xABCDEF00, false}, // the second, low nibble corrupted
 		{0x12345678, false},
