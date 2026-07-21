@@ -56,6 +56,12 @@ type Config struct {
 	// satisfy the HDHomeRun checksum. Leave unset to derive one.
 	DeviceID string `json:"device_id,omitempty"`
 
+	// AllowATSC3 admits next-generation broadcast channels into the lineup.
+	// They are excluded by default: their AC4 audio does not play reliably on
+	// the consumers, and every one of them shadows an ATSC 1.0 channel that
+	// does play.
+	AllowATSC3 bool `json:"allow_atsc3,omitempty"`
+
 	// AdvertiseAddress overrides the host:port Sourcery puts in the stream URLs
 	// it hands out. Leave unset to use whatever host the consumer asked for,
 	// which is correct on a normal LAN.

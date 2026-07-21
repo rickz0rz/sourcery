@@ -54,15 +54,21 @@ Re-verify if firmware changes (PRIME was on 20260313, FLEX 4K on 20260326).
   `HD`, `SignalStrength` and `SignalQuality`; the cable lineup carries none of
   them. `DRM` appears only on protected entries. Everything optional must decode
   to zero rather than being required.
-- **The antenna's 100+ channels are ATSC 3.0.** They are HEVC video with AC4
-  audio, unlike the MPEG2/AC3 ATSC 1.0 twins they shadow (102.1 shadows 2.1,
-  104.1 shadows 4.1, and so on), and three of them are DRM-protected. They are
-  *not* interchangeable with their twins — routing a consumer to one is likely
-  to fail outright. Codec compatibility therefore outranks source preference in
-  `rankCandidate`: a stream that will not play is worth nothing.
-- **ATSC 3.0 mobile feeds are excluded.** Companion streams for handheld devices
-  appear on a `.99` subchannel with a `MOB` callsign suffix (107.99 WXYZMOB,
-  120.99 WMYDMOB). They are never what a DVR wants.
+- **The antenna's 100+ channels are ATSC 3.0, and they are excluded by
+  default.** Their AC4 audio does not play reliably on the consumers. All seven
+  shadow an MPEG2/AC3 ATSC 1.0 twin that does play (102.1 shadows 2.1, 104.1
+  shadows 4.1, and so on), so dropping them costs nothing — all 15 cross-source
+  merges survive. `allow_atsc3` in config turns them back on, in which case
+  codec compatibility outranks source preference in `rankCandidate` so they
+  stay below their twins.
+- **Detect ATSC 3.0 by HEVC video or AC4 audio, never by H264.** Cable carries
+  184 ordinary H264/AC3 channels; treating that codec as next-generation would
+  exclude a third of the lineup. Codec counts across the fleet: cable is 308
+  MPEG2 and 184 H264; antenna is 62 MPEG2, 7 HEVC, 1 H264.
+- **ATSC 3.0 mobile feeds are excluded separately.** Companion streams for
+  handheld devices appear on a `.99` subchannel with a `MOB` callsign suffix
+  (107.99 WXYZMOB, 120.99 WMYDMOB). Redundant while ATSC 3.0 is off wholesale,
+  but it keeps them out if it is ever turned on.
 - **Duplicates are pervasive on both sources.** 179 cable names appear more than
   once (GVACC2 at 5, 915 and 1090); the antenna carries seven distinct WDWO-CD
   subchannels at 18.1 through 18.7. **Merge across devices only, never within

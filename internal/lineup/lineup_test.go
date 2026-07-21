@@ -41,7 +41,7 @@ func TestSameDeviceSameNameStaysSeparate(t *testing.T) {
 			ch("18.2", "WDWO-CD", "MPEG2"),
 			ch("18.3", "WDWO-CD", "MPEG2"),
 		),
-	})
+	}, Options{})
 
 	if len(l.Channels) != 3 {
 		t.Fatalf("got %d channels, want 3 preserved", len(l.Channels))
@@ -58,7 +58,7 @@ func TestCrossDeviceMergesAndPrefersAntenna(t *testing.T) {
 	l := Merge([]device.State{
 		state("prime", config.SourceCable, ch("2", "WJBK", "MPEG2")),
 		state("flex", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
-	})
+	}, Options{})
 
 	if len(l.Channels) != 1 {
 		t.Fatalf("got %d channels, want 1 merged", len(l.Channels))
@@ -80,7 +80,7 @@ func TestBroadcastSuffixIsStripped(t *testing.T) {
 	l := Merge([]device.State{
 		state("prime", config.SourceCable, ch("4", "WDIV", "MPEG2")),
 		state("flex", config.SourceAntenna, ch("4.1", "WDIV-HD", "MPEG2")),
-	})
+	}, Options{})
 	if len(l.Channels) != 1 {
 		t.Fatalf("WDIV-HD and WDIV should merge, got %d channels", len(l.Channels))
 	}
@@ -115,13 +115,13 @@ func TestSuffixOnlyStrippedWithSeparator(t *testing.T) {
 	}
 }
 
-// ATSC 3.0 twins are HEVC/AC4, which the consumers handle poorly. A playable
-// stream matters more than which tuner it costs.
+// When ATSC 3.0 is admitted, its HEVC streams must still rank below a playable
+// twin: a stream that will not play is worth nothing, however cheap its tuner.
 func TestCompatibleCodecOutranksSourcePreference(t *testing.T) {
 	l := Merge([]device.State{
 		state("prime", config.SourceCable, ch("3", "WMYD", "MPEG2")),
 		state("flex", config.SourceAntenna, ch("120.1", "WMYD", "HEVC")),
-	})
+	}, Options{AllowATSC3: true})
 
 	c := l.Channels[0]
 	if c.Candidates[0].VideoCodec != "MPEG2" {
@@ -134,13 +134,15 @@ func TestCompatibleCodecOutranksSourcePreference(t *testing.T) {
 	}
 }
 
+// Cable carries copy-protected MPEG2 channels, so DRM exclusion has to work
+// independently of the codec.
 func TestProtectedChannelsExcluded(t *testing.T) {
 	l := Merge([]device.State{
-		state("flex", config.SourceAntenna,
-			ch("2.1", "WJBK", "MPEG2"),
-			hdhr.Channel{GuideNumber: "102.1", GuideName: "WJBK", VideoCodec: "HEVC", DRM: 1},
+		state("prime", config.SourceCable,
+			ch("2", "WJBK", "MPEG2"),
+			hdhr.Channel{GuideNumber: "999", GuideName: "LOCKED", VideoCodec: "MPEG2", DRM: 1},
 		),
-	})
+	}, Options{})
 
 	if l.Excluded.DRM != 1 {
 		t.Errorf("Excluded.DRM = %d, want 1", l.Excluded.DRM)
@@ -148,12 +150,54 @@ func TestProtectedChannelsExcluded(t *testing.T) {
 	if len(l.Channels) != 1 {
 		t.Fatalf("got %d channels, want the DRM entry dropped", len(l.Channels))
 	}
-	if l.Channels[0].Number != "2.1" {
-		t.Errorf("kept %q, want the unprotected 2.1", l.Channels[0].Number)
+	if l.Channels[0].Number != "2" {
+		t.Errorf("kept %q, want the unprotected channel", l.Channels[0].Number)
+	}
+}
+
+// ATSC 3.0 is dropped wholesale by default: its AC4 audio does not play
+// reliably, and every such channel here shadows an ATSC 1.0 twin that does.
+func TestATSC3ExcludedByDefault(t *testing.T) {
+	states := []device.State{
+		state("flex", config.SourceAntenna,
+			ch("2.1", "WJBK", "MPEG2"),
+			hdhr.Channel{GuideNumber: "102.1", GuideName: "WJBK", VideoCodec: "HEVC", AudioCodec: "AC4"},
+			hdhr.Channel{GuideNumber: "104.1", GuideName: "WDIV", VideoCodec: "HEVC", AudioCodec: "AC4"},
+		),
+	}
+
+	l := Merge(states, Options{})
+	if l.Excluded.ATSC3 != 2 {
+		t.Errorf("Excluded.ATSC3 = %d, want 2", l.Excluded.ATSC3)
+	}
+	if len(l.Channels) != 1 || l.Channels[0].Number != "2.1" {
+		t.Fatalf("want only the ATSC 1.0 channel, got %+v", l.Channels)
+	}
+
+	// The capability is retained, just off.
+	if allowed := Merge(states, Options{AllowATSC3: true}); allowed.Excluded.ATSC3 != 0 {
+		t.Errorf("AllowATSC3 should admit them, still excluded %d", allowed.Excluded.ATSC3)
+	}
+}
+
+// H264 is ordinary: cable carries 184 such channels. Treating it as
+// next-generation would exclude a third of the lineup.
+func TestH264IsNotTreatedAsATSC3(t *testing.T) {
+	l := Merge([]device.State{
+		state("prime", config.SourceCable, ch("36", "TRUTV", "H264")),
+	}, Options{})
+
+	if l.Excluded.ATSC3 != 0 {
+		t.Fatalf("H264 was excluded as ATSC 3.0")
+	}
+	if !compatible("H264") {
+		t.Error("H264 must rank as playable")
 	}
 }
 
 // ATSC 3.0 companion feeds for handheld devices are never what a DVR wants.
+// Checked with ATSC 3.0 admitted, since otherwise the wholesale exclusion
+// would mask whether this rule works at all.
 func TestMobileVariantsExcluded(t *testing.T) {
 	l := Merge([]device.State{
 		state("flex", config.SourceAntenna,
@@ -161,7 +205,7 @@ func TestMobileVariantsExcluded(t *testing.T) {
 			ch("107.99", "WXYZMOB", "HEVC"), // .99 subchannel and MOB callsign
 			ch("120.99", "WMYDMOB", "HEVC"),
 		),
-	})
+	}, Options{AllowATSC3: true})
 
 	if l.Excluded.Mobile != 2 {
 		t.Errorf("Excluded.Mobile = %d, want 2", l.Excluded.Mobile)
@@ -199,7 +243,7 @@ func TestUnreachableDeviceContributesNothing(t *testing.T) {
 	l := Merge([]device.State{
 		broken,
 		state("flex", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
-	})
+	}, Options{})
 	if len(l.Channels) != 1 || len(l.Channels[0].Candidates) != 1 {
 		t.Fatalf("a failed probe must not contribute channels: %+v", l.Channels)
 	}
@@ -217,7 +261,7 @@ func TestChannelOrdering(t *testing.T) {
 			ch("2.10", "B", "MPEG2"),
 			ch("2.2", "A", "MPEG2"),
 		),
-	})
+	}, Options{})
 
 	var got []string
 	for _, c := range l.Channels {
@@ -237,7 +281,7 @@ func TestAsHDHomeRunPointsAtSourcery(t *testing.T) {
 			GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", AudioCodec: "AC3", HD: 1,
 			URL: "http://192.0.2.10:5004/auto/v2.1",
 		}),
-	})
+	}, Options{})
 
 	out := l.AsHDHomeRun("http://192.0.2.20:5004")
 	if len(out) != 1 {

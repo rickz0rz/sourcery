@@ -44,12 +44,34 @@ type Lineup struct {
 
 // Exclusions breaks down the channels left out of the merged lineup.
 type Exclusions struct {
+	ATSC3  int // next-generation broadcast, off by default
 	DRM    int // copy-protected, so unplayable by the consumers
 	Mobile int // ATSC 3.0 streams tailored to handheld devices
 }
 
 // Total returns the number of excluded channels.
-func (e Exclusions) Total() int { return e.DRM + e.Mobile }
+func (e Exclusions) Total() int { return e.ATSC3 + e.DRM + e.Mobile }
+
+// Options tunes what the merged lineup contains.
+type Options struct {
+	// AllowATSC3 admits next-generation broadcast channels. It is off by
+	// default: their AC4 audio does not play reliably on the consumers, and a
+	// channel that cannot be played is worse than one that is simply absent.
+	AllowATSC3 bool
+}
+
+// isATSC3 reports whether a channel is a next-generation broadcast.
+//
+// HEVC video is the reliable signature: on this fleet it selects exactly the
+// seven ATSC 3.0 entries and nothing else. AC4 is checked too so an AC4 stream
+// carried over some other video codec is still caught.
+//
+// H264 is deliberately not a signal. Cable carries 184 ordinary H264/AC3
+// channels, and treating that codec as next-generation would exclude a third
+// of the lineup.
+func isATSC3(ch hdhr.Channel) bool {
+	return strings.EqualFold(ch.VideoCodec, "HEVC") || strings.EqualFold(ch.AudioCodec, "AC4")
+}
 
 // mobileVariant reports whether a channel is an ATSC 3.0 stream intended for
 // handheld devices rather than for television.
@@ -64,14 +86,15 @@ func mobileVariant(ch hdhr.Channel) bool {
 	return strings.HasSuffix(normalizeName(ch.GuideName), "MOB")
 }
 
-// compatible reports whether a codec pair is broadly playable by the consumers.
+// compatible reports whether a video codec is broadly playable by the
+// consumers. MPEG2 and H264 both are, and between them they cover every
+// ATSC 1.0 and cable channel on this fleet; HEVC, which means ATSC 3.0, is not.
 //
-// The ATSC 3.0 channels on the antenna device are HEVC video with AC4 audio,
-// which Plex and Channels handle poorly or not at all, while their ATSC 1.0
-// twins are MPEG2/AC3. Preferring the compatible pair matters more than any
-// tuner-economy preference: a stream that will not play is worth nothing.
+// This only matters when AllowATSC3 is set, since otherwise those channels are
+// dropped before ranking. Preferring a playable stream outranks any
+// tuner-economy preference: one that will not play is worth nothing.
 func compatible(videoCodec string) bool {
-	return strings.EqualFold(videoCodec, "MPEG2")
+	return strings.EqualFold(videoCodec, "MPEG2") || strings.EqualFold(videoCodec, "H264")
 }
 
 // rankCandidate orders the ways of receiving one logical channel. Lower sorts
@@ -142,14 +165,18 @@ func normalizeName(name string) string {
 // channels. Cross-device matches are the ones worth merging, because they are
 // what makes source preference and failover possible.
 //
-// Two classes of channel are dropped outright rather than merely ranked low,
-// because there is no circumstance in which routing a consumer to them helps:
+// Several classes of channel are dropped outright rather than merely ranked
+// low, because there is no circumstance in which routing a consumer to them
+// helps:
 //
-//   - Copy-protected channels, which the consumers cannot play at all. In
-//     practice this is mostly ATSC 3.0, and it removes the DRM-bearing
-//     duplicates of channels that remain available over ATSC 1.0.
+//   - ATSC 3.0, unless opts.AllowATSC3 is set. Its AC4 audio does not play
+//     reliably on the consumers. Every such channel here shadows an ATSC 1.0
+//     twin that does play, so nothing is lost by dropping them.
+//   - Copy-protected channels, which the consumers cannot play at all.
 //   - ATSC 3.0 mobile companion feeds, which are meant for handheld devices.
-func Merge(states []device.State) Lineup {
+//     Redundant while ATSC 3.0 is excluded wholesale, but it keeps them out if
+//     next-generation channels are ever admitted.
+func Merge(states []device.State, opts Options) Lineup {
 	groups := make(map[string][]Candidate)
 	names := make(map[string]string) // merge key -> first-seen display name
 
@@ -161,6 +188,9 @@ func Merge(states []device.State) Lineup {
 		}
 		for _, ch := range s.Lineup {
 			switch {
+			case !opts.AllowATSC3 && isATSC3(ch):
+				excluded.ATSC3++
+				continue
 			case ch.Protected():
 				excluded.DRM++
 				continue

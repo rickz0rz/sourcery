@@ -53,8 +53,10 @@ func run() error {
 	defer cancelProbe()
 	states := registry.Probe(probeCtx)
 
+	opts := lineup.Options{AllowATSC3: cfg.AllowATSC3}
+
 	if *probeOnly {
-		report(states)
+		report(states, opts)
 		return reachabilityError(states)
 	}
 	if err := reachabilityError(states); err != nil {
@@ -66,7 +68,7 @@ func run() error {
 		return err
 	}
 
-	merged := lineup.Merge(states)
+	merged := lineup.Merge(states, opts)
 	srv.SetLineup(merged)
 
 	for _, s := range states {
@@ -78,6 +80,7 @@ func run() error {
 	log.Info("lineup merged",
 		"channels", len(merged.Channels),
 		"multi_source", countMultiSource(merged),
+		"atsc3_excluded", merged.Excluded.ATSC3,
 		"drm_excluded", merged.Excluded.DRM,
 		"mobile_excluded", merged.Excluded.Mobile)
 
@@ -136,7 +139,7 @@ func countMultiSource(l lineup.Lineup) int {
 	return n
 }
 
-func report(states []device.State) {
+func report(states []device.State, opts lineup.Options) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "DEVICE\tADDRESS\tSOURCE\tMODEL\tTUNERS\tCHANNELS\tDRM")
 
@@ -170,11 +173,11 @@ func report(states []device.State) {
 		}
 	}
 
-	merged := lineup.Merge(states)
+	merged := lineup.Merge(states, opts)
 	fmt.Printf("\nmerged lineup: %d channels, %d available from more than one source\n",
 		len(merged.Channels), countMultiSource(merged))
-	fmt.Printf("excluded: %d copy-protected, %d ATSC 3.0 mobile feeds\n",
-		merged.Excluded.DRM, merged.Excluded.Mobile)
+	fmt.Printf("excluded: %d ATSC 3.0, %d copy-protected, %d mobile feeds\n",
+		merged.Excluded.ATSC3, merged.Excluded.DRM, merged.Excluded.Mobile)
 
 	for _, c := range merged.Channels {
 		if len(c.Candidates) < 2 {

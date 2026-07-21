@@ -32,7 +32,7 @@ func testServer(t *testing.T, chans ...hdhr.Channel) *Server {
 	s.SetLineup(lineup.Merge([]device.State{{
 		Device: &device.Device{Device: cfg.Devices[0]},
 		Lineup: chans,
-	}}))
+	}}, lineup.Options{AllowATSC3: cfg.AllowATSC3}))
 	return s
 }
 

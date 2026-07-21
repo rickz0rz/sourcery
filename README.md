@@ -79,7 +79,7 @@ traffic it did not originate still counts against capacity.
 
 ## How the lineup is merged
 
-562 channels across the two devices become 535, with every station reachable
+562 channels across the two devices become 533, with every station reachable
 from both sources listed once and its alternatives ranked.
 
 Entries merge **only across devices, never within one**: seven distinct
@@ -89,11 +89,22 @@ transmission-type suffix, so the antenna's `WDIV-HD` meets cable's `WDIV`.
 
 Candidates for a channel are ranked by playable codec first, then antenna
 before cable, then lowest channel number. Codec outranks source preference
-because the antenna's ATSC 3.0 channels are HEVC/AC4 — a stream that will not
-play is worth nothing, however cheap its tuner.
+because a stream that will not play is worth nothing, however cheap its tuner.
 
-Dropped entirely: copy-protected channels, which the consumers cannot play, and
-ATSC 3.0 mobile companion feeds (`.99` subchannels with `MOB` callsigns).
+Dropped entirely:
+
+- **ATSC 3.0**, whose AC4 audio does not play reliably on the consumers. Every
+  such channel here shadows an ATSC 1.0 twin that does play, so nothing is lost.
+  Set `"allow_atsc3": true` to admit them; they are ranked below their twins
+  rather than preferred.
+- **Copy-protected channels**, which the consumers cannot play at all.
+- **ATSC 3.0 mobile companion feeds** — `.99` subchannels with `MOB` callsigns,
+  meant for handheld devices. Redundant while ATSC 3.0 is off wholesale, but it
+  keeps them out if it is ever turned on.
+
+ATSC 3.0 is identified by HEVC video or AC4 audio. H264 is *not* a signal:
+cable carries 184 ordinary H264/AC3 channels, and treating that codec as
+next-generation would exclude a third of the lineup.
 
 ## Configuration
 
