@@ -69,19 +69,37 @@ Re-verify if firmware changes (PRIME was on 20260313, FLEX 4K on 20260326).
   handheld devices appear on a `.99` subchannel with a `MOB` callsign suffix
   (107.99 WXYZMOB, 120.99 WMYDMOB). Redundant while ATSC 3.0 is off wholesale,
   but it keeps them out if it is ever turned on.
-- **Duplicates are pervasive on both sources.** 179 cable names appear more than
-  once (GVACC2 at 5, 915 and 1090); the antenna carries seven distinct WDWO-CD
-  subchannels at 18.1 through 18.7. **Merge across devices only, never within
-  one** — two numbers on one device are two channels even when the names match,
-  and collapsing them silently deletes channels. This bit once already.
+- **Cable is the spine; identity and routing are separate.** The presented
+  number and callsign always come from the cable lineup, because it is far more
+  comprehensive (492 against 70) and is what the consumers' guide data is built
+  around. Antenna feeds attach as *routing candidates* and are preferred for
+  streaming, so the substitution is invisible to consumers. Never let a
+  routing preference change what a channel is called — that breaks guide data.
+- **Cable channels are never merged with each other.** Cable presents WDIV at 4
+  and WDIVDT at 232 as separate channels with separate guide data; pass that
+  through untouched. One antenna feed may attach to several cable channels, and
+  should.
+- **Duplicates are pervasive.** 179 cable names appear more than once (GVACC2 at
+  5, 915 and 1090); the antenna carries seven distinct WDWO-CD subchannels at
+  18.1 through 18.7. Antenna-only channels are appended individually — never
+  collapse them by name. An earlier name-only merge silently deleted six of the
+  WDWO-CD feeds.
 - **The two sources name stations differently.** The antenna suffixes callsigns
-  with a transmission type (`WDIV-HD`, `CHWI_HD`, `WDWO-CD`, `WUDT-LD`); cable
-  uses the bare callsign (`WDIV`). `normalizeName` strips such a suffix, but
-  only when a separator sets it off — cable's own `QVCHD` and `QVC` are
-  genuinely different channels and must not collapse.
-- **15 channels genuinely overlap both sources**, including all the main locals.
-  Source preference is still the narrower optimization; stream reuse is the
-  broad one, and the two should not be conflated.
+  with a transmission type (`WDIV-HD`, `CHWI_HD`, `WUDT-LD`); cable uses the
+  bare callsign (`WDIV`) plus a `DT`-suffixed high definition twin (`WDIVDT`).
+  `normalizeName` strips a separator-delimited suffix and a bare trailing `DT`.
+  Guards that matter: the suffix needs a separator, so cable's genuinely
+  distinct `QVCHD` and `QVC` do not collapse; `DT` trimming requires a
+  three-character stem, so `WUDT` is not cut to `WU`; and `WDIVDT2` keeps its
+  digit, so subchannels are untouched.
+- **35 channels resolve from more than one source.** Some stations will never
+  match automatically — the antenna calls one feed `H&I` where cable calls it
+  `WDIVDT2`. That is what manual mapping (M5) is for; do not widen the fuzzy
+  matching to chase them.
+- **Both devices report the HD flag** — 22 of 70 antenna channels, 184 of 492
+  cable ones, and on cable that is exactly the H264 set. Ranking prefers HD
+  above source preference: a viewer notices standard definition and does not
+  notice which tuner produced the picture.
 - **Device IDs carry a checksum.** Consumers reject malformed ones, so the
   emulated ID must validate. See `internal/hdhr/deviceid.go`; the algorithm is
   verified against both real device IDs in tests.

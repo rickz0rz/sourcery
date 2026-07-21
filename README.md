@@ -65,12 +65,16 @@ prime   192.0.2.11  cable    HDHR3-CC  3 free / 3  492       7
 6 of 7 tuners free
   flex/tuner2 in use by 192.0.2.30 (reports channel 2.1 WJBK)
 
-merged lineup: 535 channels, 15 available from more than one source
-excluded: 10 copy-protected, 2 ATSC 3.0 mobile feeds
-  2.1      WJBK         flex:2.1 ->  prime:2
-  4.1      WDIV-HD      flex:4.1 ->  prime:4
-  7.1      WXYZ-HD      flex:7.1 ->  prime:7
+merged lineup: 531 channels, 35 available from more than one source
+excluded: 7 ATSC 3.0, 7 copy-protected, 0 mobile feeds
+  2        WJBK         flex:2.1 ->  prime:2
+  4        WDIV         flex:4.1 ->  prime:4
+  16       HSN          flex:20.4 ->  flex:31.8 ->  flex:38.7 ->  prime:16
+  232      WDIVDT       flex:4.1 ->  prime:232
 ```
+
+Each row is a channel with more than one source, listed in the order Sourcery
+will try them.
 
 The `in use by` line is a consumer streaming *directly* from a device,
 bypassing Sourcery. Tuner accounting is derived from each device's
@@ -79,17 +83,37 @@ traffic it did not originate still counts against capacity.
 
 ## How the lineup is merged
 
-562 channels across the two devices become 533, with every station reachable
-from both sources listed once and its alternatives ranked.
+562 channels across the two devices become 531, of which 35 are reachable from
+more than one source.
 
-Entries merge **only across devices, never within one**: seven distinct
-WDWO-CD subchannels share a callsign on the antenna, and collapsing those by
-name would delete six channels. Names are matched after dropping a
-transmission-type suffix, so the antenna's `WDIV-HD` meets cable's `WDIV`.
+**Identity and routing are separate concerns.** The cable lineup is the spine:
+it is far more comprehensive (492 channels against 70), and it is what the
+consumers' guide data is built around, so every channel keeps cable's number
+and callsign. The antenna then attaches to any channel it can also serve, and
+is *preferred* for streaming. A consumer asking for cable channel 4 is served
+from the antenna without ever knowing an antenna exists.
 
-Candidates for a channel are ranked by playable codec first, then antenna
-before cable, then lowest channel number. Codec outranks source preference
-because a stream that will not play is worth nothing, however cheap its tuner.
+Cable channels are never merged with each other. Cable presents `WDIV` at 4 and
+`WDIVDT` at 232 as separate channels with separate guide data, and Sourcery
+passes that through untouched — but one antenna feed attaches to *both*, so
+either listing can be served from the antenna.
+
+Channels that exist only on the antenna — subchannels like `2.2 Movies!` or the
+seven distinct `WDWO-CD` feeds — are appended, each standing on its own.
+
+Names are matched after dropping a transmission-type suffix (`WDIV-HD` meets
+`WDIV`) and a bare `DT` (`WDIVDT` meets `WDIV`). Numbered variants are left
+alone, since `WDIVDT2` is a different programme, and the stem must still look
+like a callsign so `WUDT` is not cut down to `WU`.
+
+Candidates are ranked by playable codec, then high definition, then antenna
+before cable, then lowest number. Codec comes first because a stream that will
+not play is worth nothing however cheap its tuner; picture quality comes before
+tuner economy because a viewer notices standard definition and will not notice
+which tuner produced the picture.
+
+Some stations will not match automatically — the antenna calls one channel
+`H&I` where cable calls it `WDIVDT2`. Manual mapping (M5) is for those.
 
 Dropped entirely:
 

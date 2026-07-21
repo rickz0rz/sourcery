@@ -4,7 +4,6 @@ package lineup
 
 import (
 	"cmp"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,13 +25,26 @@ type Candidate struct {
 	HD          bool
 }
 
-// Channel is a logical channel with every known way to receive it, best first.
+// Channel is a logical channel: an identity as consumers see it, plus every
+// known way to receive it, best first.
+//
+// Identity and routing are deliberately separate. Number and Name come from the
+// spine device so that the lineup a consumer sees matches the guide data it
+// fetches, while Candidates are ordered by what is cheapest and best to stream
+// right now. A consumer asking for cable channel 4 may well be served from the
+// antenna without ever knowing an antenna is involved.
 type Channel struct {
 	Number     string // the number Sourcery presents to consumers
 	Name       string
 	HD         bool
 	Candidates []Candidate
+
+	spine bool // identity came from the comprehensive lineup
 }
+
+// FromSpine reports whether this channel came from the comprehensive lineup
+// rather than existing only on an alternate device.
+func (c Channel) FromSpine() bool { return c.spine }
 
 // Lineup is the merged view across all devices.
 type Lineup struct {
@@ -101,10 +113,19 @@ func compatible(videoCodec string) bool {
 // first. The ordering is, in priority order:
 //
 //  1. playable codec before exotic codec
-//  2. antenna before cable, to conserve the scarcer cable tuners
-//  3. lower channel number, which is usually the canonical listing
+//  2. high definition before standard definition
+//  3. antenna before cable, to conserve the scarcer cable tuners
+//  4. lower channel number, which is usually the canonical listing
+//
+// Picture quality outranks tuner economy: a viewer notices a standard
+// definition picture, and will not notice which tuner produced it. Both devices
+// report the HD flag, so the comparison is meaningful in both directions --
+// an HD cable feed is preferred over a standard definition antenna one.
 func rankCandidate(a, b Candidate) int {
 	if n := cmp.Compare(codecRank(a), codecRank(b)); n != 0 {
+		return n
+	}
+	if n := cmp.Compare(hdRank(a), hdRank(b)); n != 0 {
 		return n
 	}
 	if n := cmp.Compare(a.Source.Rank(), b.Source.Rank()); n != 0 {
@@ -115,6 +136,13 @@ func rankCandidate(a, b Candidate) int {
 
 func codecRank(c Candidate) int {
 	if compatible(c.VideoCodec) {
+		return 0
+	}
+	return 1
+}
+
+func hdRank(c Candidate) int {
+	if c.HD {
 		return 0
 	}
 	return 1
@@ -153,7 +181,27 @@ func normalizeName(name string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	return trimDigitalSuffix(b.String())
+}
+
+// trimDigitalSuffix drops a bare DT from the end of a callsign.
+//
+// Cable writes the high definition feed of a local station as WDIVDT, WJBKDT
+// and so on, alongside a standard definition WDIV. Without this, the antenna's
+// WDIV-HD matches only the standard definition cable listing, and the high
+// definition one -- the channel a viewer is far more likely to be watching --
+// never picks up an antenna alternative at all.
+//
+// Numbered variants are left alone: WDIVDT2 and WDIVDT3 are separate
+// subchannels carrying different programmes, and they do not end in DT. The
+// remainder must still look like a callsign, which keeps WUDT (a real station,
+// listed as WUDT-LD) from being cut down to WU.
+func trimDigitalSuffix(s string) string {
+	const minCallsign = 3
+	if rest, ok := strings.CutSuffix(s, "DT"); ok && len(rest) >= minCallsign {
+		return rest
+	}
+	return s
 }
 
 // Merge builds the unified lineup from a fleet probe.
@@ -177,64 +225,89 @@ func normalizeName(name string) string {
 //     Redundant while ATSC 3.0 is excluded wholesale, but it keeps them out if
 //     next-generation channels are ever admitted.
 func Merge(states []device.State, opts Options) Lineup {
-	groups := make(map[string][]Candidate)
-	names := make(map[string]string) // merge key -> first-seen display name
-
 	var excluded Exclusions
+	usable := make(map[*device.Device][]hdhr.Channel)
+	var devices []*device.Device
 
 	for _, s := range states {
 		if s.Err != nil {
 			continue
 		}
+		devices = append(devices, s.Device)
 		for _, ch := range s.Lineup {
 			switch {
 			case !opts.AllowATSC3 && isATSC3(ch):
 				excluded.ATSC3++
-				continue
 			case ch.Protected():
 				excluded.DRM++
-				continue
 			case mobileVariant(ch):
 				excluded.Mobile++
-				continue
+			default:
+				usable[s.Device] = append(usable[s.Device], ch)
 			}
-			key := normalizeName(ch.GuideName)
-			if key == "" {
-				continue
-			}
-			groups[key] = append(groups[key], Candidate{
-				Device:      s.Device.Name,
-				Source:      s.Device.Source,
-				GuideNumber: ch.GuideNumber,
-				URL:         ch.URL,
-				VideoCodec:  ch.VideoCodec,
-				AudioCodec:  ch.AudioCodec,
-				HD:          ch.HD != 0,
-			})
-			if _, ok := names[key]; !ok {
-				names[key] = ch.GuideName
+		}
+	}
+
+	spine := spineSource(devices)
+
+	// Index the alternate devices' channels by station, so each spine channel
+	// can pick up every feed of the same station.
+	alternates := make(map[string][]Candidate)
+	for _, d := range devices {
+		if d.Source == spine {
+			continue
+		}
+		for _, ch := range usable[d] {
+			if key := normalizeName(ch.GuideName); key != "" {
+				alternates[key] = append(alternates[key], candidateOf(d, ch))
 			}
 		}
 	}
 
 	var channels []Channel
-	for key, cands := range groups {
-		primary, extra := splitByDevice(cands)
+	attached := make(map[string]bool)
 
-		slices.SortStableFunc(primary, rankCandidate)
-		channels = append(channels, Channel{
-			Number:     primary[0].GuideNumber, // the best candidate names the channel
-			Name:       names[key],
-			HD:         anyHD(primary),
-			Candidates: primary,
-		})
+	// The spine's channels are the lineup, one for one. They are never merged
+	// with each other: cable presents WDIV at 4 and WDIVDT at 232 as separate
+	// channels with separate guide data, and Sourcery must not second-guess
+	// that. Alternates attach to every spine channel they match, so an antenna
+	// feed can serve both the standard and high definition cable listings.
+	for _, d := range devices {
+		if d.Source != spine {
+			continue
+		}
+		for _, ch := range usable[d] {
+			key := normalizeName(ch.GuideName)
+			cands := append([]Candidate{candidateOf(d, ch)}, alternates[key]...)
+			slices.SortStableFunc(cands, rankCandidate)
+			attached[key] = true
 
-		// Same name, same device, different number: a distinct channel that
-		// happens to share a callsign. It stands on its own.
-		for _, c := range extra {
 			channels = append(channels, Channel{
-				Number:     c.GuideNumber,
-				Name:       names[key],
+				Number:     ch.GuideNumber, // identity always comes from the spine
+				Name:       ch.GuideName,
+				HD:         anyHD(cands),
+				Candidates: cands,
+				spine:      true,
+			})
+		}
+	}
+
+	// Alternate channels with no counterpart on the spine still belong in the
+	// lineup; they are simply not available from the comprehensive source. Each
+	// entry stands alone, so the antenna's seven distinct WDWO-CD subchannels
+	// stay seven channels.
+	for _, d := range devices {
+		if d.Source == spine {
+			continue
+		}
+		for _, ch := range usable[d] {
+			if key := normalizeName(ch.GuideName); key == "" || attached[key] {
+				continue
+			}
+			c := candidateOf(d, ch)
+			channels = append(channels, Channel{
+				Number:     ch.GuideNumber,
+				Name:       ch.GuideName,
 				HD:         c.HD,
 				Candidates: []Candidate{c},
 			})
@@ -251,22 +324,31 @@ func Merge(states []device.State, opts Options) Lineup {
 	return Lineup{Channels: channels, Excluded: excluded}
 }
 
-// splitByDevice picks the best candidate from each device as the merged
-// channel's alternatives, and returns every other entry separately so it can
-// stand as its own channel.
-func splitByDevice(cands []Candidate) (primary, extra []Candidate) {
-	byDevice := make(map[string][]Candidate)
-	for _, c := range cands {
-		byDevice[c.Device] = append(byDevice[c.Device], c)
+// spineSource picks the source that supplies the lineup's identity.
+//
+// Cable wins when present: it is far more comprehensive (492 channels against
+// 70 here), and it is the lineup the consumers' guide data is built around.
+// Presenting cable's numbering means a consumer sees the lineup it expects
+// while Sourcery quietly serves it from the antenna wherever it can.
+func spineSource(devices []*device.Device) config.Source {
+	for _, d := range devices {
+		if d.Source == config.SourceCable {
+			return config.SourceCable
+		}
 	}
+	return config.SourceAntenna
+}
 
-	for _, name := range slices.Sorted(maps.Keys(byDevice)) { // deterministic
-		group := byDevice[name]
-		slices.SortStableFunc(group, rankCandidate)
-		primary = append(primary, group[0])
-		extra = append(extra, group[1:]...)
+func candidateOf(d *device.Device, ch hdhr.Channel) Candidate {
+	return Candidate{
+		Device:      d.Name,
+		Source:      d.Source,
+		GuideNumber: ch.GuideNumber,
+		URL:         ch.URL,
+		VideoCodec:  ch.VideoCodec,
+		AudioCodec:  ch.AudioCodec,
+		HD:          ch.HD != 0,
 	}
-	return primary, extra
 }
 
 func anyHD(cands []Candidate) bool {
