@@ -33,14 +33,15 @@ reasoning and the milestone breakdown.
 
 ## Status
 
-**M1 — Sourcery serves a discoverable tuner with a merged lineup.** Streaming
-is not implemented yet; stream requests return 503.
+**M2 — Sourcery streams.** Consumers can discover it, scan its lineup, and play
+live television through it. Each consumer still gets its own tuner; sharing one
+upstream between several consumers is M3.
 
 - [x] **M0** Config, device registry, one-shot probe
 - [x] **M1** Lineup merge and HDHomeRun emulation endpoints
-- [ ] **M2** Passthrough proxy and arbitration
+- [x] **M2** Passthrough proxy and arbitration
 - [ ] **M3** Stream reuse via fan-out
-- [ ] **M4** Status reconciliation and source preference
+- [ ] **M4** Grace periods and richer reconciliation
 - [ ] **M5** Manual lineup overrides and operability
 
 ## Usage
@@ -114,6 +115,31 @@ which tuner produced the picture.
 
 Some stations will not match automatically — the antenna calls one channel
 `H&I` where cable calls it `WDIVDT2`. Manual mapping (M5) is for those.
+
+## How a stream is served
+
+A consumer asks Sourcery for a channel. Sourcery walks that channel's
+candidates in preference order, claims a tuner on the first device with one
+free, opens the upstream stream, and relays it.
+
+Requesting cable channel 2 gets served from the antenna:
+
+```
+msg=streaming consumer=127.0.0.1 channel=2 name=WJBK device=flex source=antenna device_channel=2.1
+msg="stream ended" consumer=127.0.0.1 channel=2 device=flex bytes=9695860 seconds=9
+```
+
+Capacity has two parts. Sourcery knows exactly what it is holding, because it
+opened it. What *else* is using the devices is learned by polling each
+`status.json` every five seconds — consumers that bypass Sourcery are a normal
+condition, and their tuners must count or the arbiter will hand out tuners that
+do not exist.
+
+That poll is always slightly stale, so the device is the final authority: if
+opening a stream fails, Sourcery releases the claim and tries the next
+candidate. When no candidate works, it answers 503 rather than tearing down a
+stream that is already playing. Nothing in flight is ever interrupted, and the
+refusal is logged so contention is visible.
 
 Dropped entirely:
 

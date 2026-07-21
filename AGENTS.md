@@ -21,9 +21,19 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
 - **Layout.** `main.go` at the root stays thin; real work lives in
   `internal/{config,device,hdhr}`.
 - **`internal/hdhr` is control-plane only.** It speaks to the devices' JSON
-  endpoints. Streaming deliberately does not belong here — because a device
-  allocates a tuner per connection, stream lifetime is an arbitration concern
-  and belongs with the proxy (M2/M3).
+  endpoints. Streaming lives in `internal/stream`, and deciding which tuner to
+  use lives in `internal/arbiter` — because a device allocates a tuner per
+  connection, stream lifetime is an arbitration concern, not a client one.
+- **Every acquired lease must be released exactly once.** `Lease.Release` is
+  idempotent and the handler defers it, but a path that acquires and then fails
+  before streaming has to release explicitly or that tuner is lost until
+  restart. The fallback path in `handleStream` is the case to watch.
+- **Never set a write timeout on the HTTP server or the stream client.** A
+  stream stays open for as long as someone is watching; a deadline would cut it
+  off mid-programme. Only connect and response-header phases are bounded.
+- **A cancelled request is a normal stream ending, not an error.** Consumers
+  disconnect constantly, which cancels the request context and surfaces as a
+  read error. Treating it as a failure buries the real errors.
 - **Tests use verbatim device JSON.** Fixtures in `internal/hdhr/types_test.go`
   are real captures, trimmed and with `DeviceAuth` redacted. Keep new fixtures
   real; the field-presence quirks below are the entire reason these tests exist.
@@ -105,6 +115,21 @@ Re-verify if firmware changes (PRIME was on 20260313, FLEX 4K on 20260326).
   verified against both real device IDs in tests.
 - **Stream paths carry a `v` prefix.** `/auto/v2.1` means "tune virtual channel
   2.1"; the `v` is not part of the number.
+
+## Tuner accounting
+
+- **Capacity is `tuners - held - foreign`.** `held` is what Sourcery opened and
+  is authoritative and immediate. `foreign` is everything else, learned by
+  polling `status.json` every five seconds.
+- **`status.json` counts Sourcery's own streams too**, so foreign usage is
+  `inUse - held`, clamped at zero. The two figures are sampled at slightly
+  different moments and can briefly disagree; a negative result must never
+  become spare capacity.
+- **The device is the final authority.** The poll is always stale, so a device
+  may refuse a tuner the arbiter believed was free. Release the lease and try
+  the next candidate rather than failing the request.
+- **Never evict a stream in flight.** When nothing is available, answer 503 and
+  log it. Contention is meant to be visible, not silently resolved.
 
 ## Handling secrets
 

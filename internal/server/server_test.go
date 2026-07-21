@@ -1,21 +1,33 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"sourcery/internal/arbiter"
 	"sourcery/internal/config"
 	"sourcery/internal/device"
 	"sourcery/internal/hdhr"
 	"sourcery/internal/lineup"
+	"sourcery/internal/stream"
 )
 
 func testServer(t *testing.T, chans ...hdhr.Channel) *Server {
+	t.Helper()
+	return testServerWithTuners(t, 4, chans...)
+}
+
+// testServerWithTuners builds a server backed by a single antenna device with
+// the given tuner count, so capacity exhaustion can be exercised.
+func testServerWithTuners(t *testing.T, tuners int, chans ...hdhr.Channel) *Server {
 	t.Helper()
 	cfg := &config.Config{
 		Listen:       ":5004",
@@ -25,15 +37,32 @@ func testServer(t *testing.T, chans ...hdhr.Channel) *Server {
 			{Name: "flex", Address: "192.0.2.10", Source: config.SourceAntenna},
 		},
 	}
-	s, err := New(cfg, slog.New(slog.DiscardHandler))
+	states := []device.State{{
+		Device:   &device.Device{Device: cfg.Devices[0]},
+		Discover: &hdhr.Discover{TunerCount: tuners},
+		Lineup:   chans,
+	}}
+
+	s, err := New(cfg, arbiter.New(states), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	s.SetLineup(lineup.Merge([]device.State{{
-		Device: &device.Device{Device: cfg.Devices[0]},
-		Lineup: chans,
-	}}, lineup.Options{AllowATSC3: cfg.AllowATSC3}))
+	s.SetLineup(lineup.Merge(states, lineup.Options{AllowATSC3: cfg.AllowATSC3}))
 	return s
+}
+
+// fakeTuner serves a transport stream of the given size, and reports how many
+// concurrent connections it saw.
+func fakeTuner(t *testing.T, payload []byte) (url string, opened *atomic.Int32) {
+	t.Helper()
+	opened = new(atomic.Int32)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		opened.Add(1)
+		w.Header().Set("Content-Type", stream.ContentType)
+		w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, opened
 }
 
 func get(t *testing.T, s *Server, path string) *http.Response {
@@ -148,18 +177,154 @@ func TestDeviceXML(t *testing.T) {
 	}
 }
 
-// Until M2 lands, a stream request must fail fast rather than hang. The "v"
-// prefix means "tune by virtual channel number" and is not part of the number,
-// so it must be stripped before the lineup is consulted.
-func TestStreamResolvesChannelThenRefuses(t *testing.T) {
+// The "v" prefix means "tune by virtual channel number" and is not part of the
+// number, so it must be stripped before the lineup is consulted.
+func TestStreamRelaysUpstream(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x47, 0x01, 0x02, 0x03}, 5000)
+	url, opened := fakeTuner(t, payload)
+
+	s := testServer(t, hdhr.Channel{
+		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: url,
+	})
+
+	resp := get(t, s, "/auto/v2.1")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %s, want 200", resp.Status)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != stream.ContentType {
+		t.Errorf("Content-Type = %q, want %q", ct, stream.ContentType)
+	}
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, payload) {
+		t.Errorf("relayed %d bytes, want the %d sent upstream", len(got), len(payload))
+	}
+	if n := opened.Load(); n != 1 {
+		t.Errorf("opened %d upstream connections, want 1", n)
+	}
+}
+
+func TestUnknownChannelIsNotFound(t *testing.T) {
 	s := testServer(t, hdhr.Channel{GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2"})
+	if resp := get(t, s, "/auto/v99.9"); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %s, want 404", resp.Status)
+	}
+}
+
+// The tuner is returned when the stream ends, or a device would be left
+// permanently "full" from the arbiter's point of view.
+func TestTunerIsReleasedAfterStreaming(t *testing.T) {
+	url, _ := fakeTuner(t, []byte("stream"))
+	s := testServerWithTuners(t, 1, hdhr.Channel{
+		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: url,
+	})
+
+	for i := range 3 {
+		resp := get(t, s, "/auto/v2.1")
+		io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status = %s, want 200 on a released tuner", i+1, resp.Status)
+		}
+	}
+	if held := s.arbiter.Snapshot()[0].Held; held != 0 {
+		t.Errorf("%d tuners still held after every stream ended", held)
+	}
+}
+
+// Never tear down a stream in flight to make room for a new one; refuse
+// instead. This is the contention policy, and it has to be observable.
+func TestRefusesWhenNoTunerIsFree(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("x"))
+		http.NewResponseController(w).Flush()
+		<-release // hold the tuner open
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	s := testServerWithTuners(t, 1, hdhr.Channel{
+		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: srv.URL,
+	})
+
+	// Occupy the single tuner.
+	started := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "http://x/auto/v2.1", nil)
+		rec := httptest.NewRecorder()
+		close(started)
+		s.Handler().ServeHTTP(rec, req)
+	}()
+	<-started
+
+	// Wait for the lease to be taken before asking for a second stream.
+	for range 100 {
+		if s.arbiter.Snapshot()[0].Held > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	if resp := get(t, s, "/auto/v2.1"); resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("known channel: status = %s, want 503", resp.Status)
+		t.Errorf("status = %s, want 503 when every tuner is busy", resp.Status)
 	}
-	// An unknown channel is a different failure from an unimplemented one.
-	if resp := get(t, s, "/auto/v99.9"); resp.StatusCode != http.StatusNotFound {
-		t.Errorf("unknown channel: status = %s, want 404", resp.Status)
+}
+
+// The arbiter's view of foreign usage is always slightly stale, so a device may
+// refuse a tuner it was believed to have. The next candidate must be tried.
+func TestFallsBackWhenUpstreamRefuses(t *testing.T) {
+	busy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no free tuner", http.StatusServiceUnavailable)
+	}))
+	defer busy.Close()
+	good, opened := fakeTuner(t, []byte("picture"))
+
+	cfg := &config.Config{
+		FriendlyName: "Sourcery", TunerCount: 7,
+		Devices: []config.Device{
+			{Name: "flex", Address: "1.1.1.1", Source: config.SourceAntenna},
+			{Name: "prime", Address: "2.2.2.2", Source: config.SourceCable},
+		},
+	}
+	states := []device.State{
+		{ // preferred, but will refuse
+			Device:   &device.Device{Device: cfg.Devices[0]},
+			Discover: &hdhr.Discover{TunerCount: 4},
+			Lineup: []hdhr.Channel{{
+				GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: busy.URL,
+			}},
+		},
+		{
+			Device:   &device.Device{Device: cfg.Devices[1]},
+			Discover: &hdhr.Discover{TunerCount: 3},
+			Lineup: []hdhr.Channel{{
+				GuideNumber: "2", GuideName: "WJBK", VideoCodec: "MPEG2", URL: good,
+			}},
+		},
+	}
+
+	arb := arbiter.New(states)
+	s, err := New(cfg, arb, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.SetLineup(lineup.Merge(states, lineup.Options{}))
+
+	resp := get(t, s, "/auto/v2")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %s, want 200 after falling back", resp.Status)
+	}
+	if body, _ := io.ReadAll(resp.Body); string(body) != "picture" {
+		t.Errorf("body = %q, want the fallback device's stream", body)
+	}
+	if opened.Load() != 1 {
+		t.Error("the fallback device was not used")
+	}
+	// The failed attempt must not leak a lease.
+	for _, st := range arb.Snapshot() {
+		if st.Held != 0 {
+			t.Errorf("%s still holds %d tuners after the stream ended", st.Device, st.Held)
+		}
 	}
 }
 
@@ -175,7 +340,7 @@ func TestConfiguredDeviceIDIsUsed(t *testing.T) {
 		DeviceID: "1234ABC2",
 		Devices:  []config.Device{{Name: "flex", Address: "1.2.3.4", Source: config.SourceAntenna}},
 	}
-	s, err := New(cfg, slog.New(slog.DiscardHandler))
+	s, err := New(cfg, arbiter.New(nil), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -184,7 +349,7 @@ func TestConfiguredDeviceIDIsUsed(t *testing.T) {
 	}
 
 	cfg.DeviceID = "1234ABC3" // fails the checksum
-	if _, err := New(cfg, slog.New(slog.DiscardHandler)); err == nil {
+	if _, err := New(cfg, arbiter.New(nil), slog.New(slog.DiscardHandler)); err == nil {
 		t.Error("an invalid configured device id should be rejected at startup")
 	}
 }

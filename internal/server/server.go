@@ -13,10 +13,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"sourcery/internal/arbiter"
 	"sourcery/internal/config"
 	"sourcery/internal/hdhr"
 	"sourcery/internal/lineup"
+	"sourcery/internal/stream"
 )
 
 // Server serves the emulated tuner.
@@ -24,6 +27,8 @@ type Server struct {
 	cfg      *config.Config
 	deviceID string
 	log      *slog.Logger
+	arbiter  *arbiter.Arbiter
+	proxy    *stream.Proxy
 
 	mu      sync.RWMutex
 	current lineup.Lineup
@@ -32,7 +37,7 @@ type Server struct {
 // New builds a Server. The device ID is taken from configuration when set and
 // derived from the managed devices otherwise, so that it stays stable across
 // restarts either way.
-func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, arb *arbiter.Arbiter, log *slog.Logger) (*Server, error) {
 	var id uint32
 	if cfg.DeviceID != "" {
 		parsed, err := hdhr.ParseDeviceID(cfg.DeviceID)
@@ -52,6 +57,8 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		cfg:      cfg,
 		deviceID: hdhr.FormatDeviceID(id),
 		log:      log,
+		arbiter:  arb,
+		proxy:    stream.NewProxy(),
 	}, nil
 }
 
@@ -161,27 +168,76 @@ func (s *Server) handleDeviceXML(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, deviceXML, s.baseURL(r), s.cfg.FriendlyName, s.deviceID)
 }
 
-// handleStream will arbitrate and proxy in M2. Until then it resolves the
-// channel and then refuses clearly, so a consumer probing fails fast and an
-// unknown channel is distinguishable from an unimplemented one.
+// handleStream routes a stream request to the best available source.
 //
 // Stream paths are of the form /auto/v2.1, where the "v" prefix means "tune by
 // virtual channel number" and is not part of the number itself.
+//
+// Candidates are tried in preference order. A candidate is skipped when its
+// device has no spare tuner, and also when opening the upstream fails: the
+// arbiter's view of foreign usage is always slightly stale, so the device
+// itself is the final authority on whether a tuner was really free.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	number := strings.TrimPrefix(r.PathValue("channel"), "v")
+	consumer := clientIP(r)
 
 	ch, ok := s.Lineup().Find(number)
 	if !ok {
 		s.log.Warn("stream requested for a channel that is not in the lineup",
-			"consumer", clientIP(r), "channel", number)
+			"consumer", consumer, "channel", number)
 		http.Error(w, "no such channel", http.StatusNotFound)
 		return
 	}
 
-	s.log.Warn("stream requested but streaming is not implemented yet",
-		"consumer", clientIP(r), "channel", number, "name", ch.Name,
-		"candidates", len(ch.Candidates))
-	http.Error(w, "streaming not implemented until M2", http.StatusServiceUnavailable)
+	for _, cand := range ch.Candidates {
+		lease, ok := s.arbiter.TryAcquire(cand)
+		if !ok {
+			continue // that device is full
+		}
+
+		up, err := s.proxy.Open(r.Context(), cand.URL)
+		if err != nil {
+			lease.Release()
+			s.log.Warn("upstream refused; trying the next source",
+				"consumer", consumer, "channel", number,
+				"device", cand.Device, "device_channel", cand.GuideNumber, "error", err)
+			continue
+		}
+
+		s.serveStream(w, r, ch, cand, up, lease)
+		return
+	}
+
+	// Never tear down a stream in flight to make room for a new one. Refusing
+	// is honest, and the log line is what makes contention visible.
+	s.log.Warn("no tuner available for stream request",
+		"consumer", consumer, "channel", number, "name", ch.Name,
+		"candidates", len(ch.Candidates), "capacity", s.arbiter.Snapshot())
+	http.Error(w, "no tuner available", http.StatusServiceUnavailable)
+}
+
+// serveStream relays an open upstream to the consumer and accounts for it.
+func (s *Server) serveStream(w http.ResponseWriter, r *http.Request,
+	ch lineup.Channel, cand lineup.Candidate, up *stream.Upstream, lease *arbiter.Lease,
+) {
+	defer up.Close()
+	defer lease.Release()
+
+	consumer := clientIP(r)
+	s.log.Info("streaming",
+		"consumer", consumer, "channel", ch.Number, "name", ch.Name,
+		"device", cand.Device, "source", cand.Source, "device_channel", cand.GuideNumber)
+
+	w.Header().Set("Content-Type", stream.ContentType)
+	w.WriteHeader(http.StatusOK)
+
+	started := time.Now()
+	n, err := up.CopyTo(w)
+
+	s.log.Info("stream ended",
+		"consumer", consumer, "channel", ch.Number,
+		"device", cand.Device, "bytes", n,
+		"seconds", int(time.Since(started).Seconds()), "error", err)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -191,8 +247,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	l := s.Lineup()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "%s\ndevice id %s\n%d channels, %d tuners advertised\n",
+	fmt.Fprintf(w, "%s\ndevice id %s\n%d channels, %d tuners advertised\n\n",
 		s.cfg.FriendlyName, s.deviceID, len(l.Channels), s.cfg.TunerCount)
+
+	fmt.Fprintln(w, "tuners:")
+	for _, st := range s.arbiter.Snapshot() {
+		fmt.Fprintf(w, "  %-8s %d free of %d  (%d held by sourcery, %d elsewhere)\n",
+			st.Device, st.Free, st.Tuners, st.Held, st.Foreign)
+	}
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {

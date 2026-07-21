@@ -18,8 +18,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"sourcery/internal/arbiter"
 	"sourcery/internal/config"
 	"sourcery/internal/device"
+	"sourcery/internal/hdhr"
 	"sourcery/internal/lineup"
 	"sourcery/internal/server"
 )
@@ -63,7 +65,8 @@ func run() error {
 		return err
 	}
 
-	srv, err := server.New(cfg, log)
+	arb := arbiter.New(states)
+	srv, err := server.New(cfg, arb, log)
 	if err != nil {
 		return err
 	}
@@ -84,10 +87,58 @@ func run() error {
 		"drm_excluded", merged.Excluded.DRM,
 		"mobile_excluded", merged.Excluded.Mobile)
 
-	return serve(cfg, srv, log)
+	return serve(cfg, srv, registry, arb, log)
 }
 
-func serve(cfg *config.Config, srv *server.Server, log *slog.Logger) error {
+// pollInterval is how often each device is asked what its tuners are doing.
+//
+// Devices free a tuner within about two seconds of a consumer disconnecting, so
+// this is frequent enough to notice capacity returning without generating
+// meaningful traffic. It only governs foreign usage: Sourcery's own streams are
+// accounted for the moment they start and stop.
+const pollInterval = 5 * time.Second
+
+// pollTuners keeps the arbiter's view of foreign tuner usage current.
+//
+// Consumers that talk to the devices directly are a normal condition, and their
+// tuners have to count against capacity or the arbiter will hand out tuners
+// that do not exist.
+func pollTuners(ctx context.Context, registry *device.Registry, arb *arbiter.Arbiter, log *slog.Logger) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, d := range registry.Devices() {
+				reqCtx, cancel := context.WithTimeout(ctx, hdhr.DefaultTimeout)
+				tuners, err := d.Client.Status(reqCtx)
+				cancel()
+
+				if err != nil {
+					log.Warn("tuner poll failed; leaving the last known capacity in place",
+						"device", d.Name, "error", err)
+					continue
+				}
+				var inUse int
+				for _, t := range tuners {
+					if t.Active() {
+						inUse++
+					}
+				}
+				arb.Reconcile(d.Name, inUse)
+			}
+		}
+	}
+}
+
+func serve(cfg *config.Config, srv *server.Server, registry *device.Registry,
+	arb *arbiter.Arbiter, log *slog.Logger,
+) error {
+	// No write timeout: a stream stays open for as long as someone is
+	// watching, and a deadline would cut it off mid-programme.
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
@@ -96,6 +147,8 @@ func serve(cfg *config.Config, srv *server.Server, log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go pollTuners(ctx, registry, arb, log)
 
 	errc := make(chan error, 1)
 	go func() {
