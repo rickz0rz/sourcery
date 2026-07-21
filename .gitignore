@@ -1,0 +1,7 @@
+# Build output
+/sourcery
+/dist/
+
+# Local device configuration; config.json is committed as the working default,
+# so keep machine-specific variants out.
+config.local.json
