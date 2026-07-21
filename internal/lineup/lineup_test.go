@@ -37,8 +37,8 @@ func find(t *testing.T, l Lineup, number string) Channel {
 // by name would silently delete six of them.
 func TestAntennaOnlyChannelsSurviveAlongsideSpine(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, ch("2", "WJBK", "MPEG2")),
-		state("flex", config.SourceAntenna,
+		state("cable", config.SourceCable, ch("2", "WJBK", "MPEG2")),
+		state("antenna", config.SourceAntenna,
 			ch("2.1", "WJBK", "MPEG2"), // attaches to cable 2
 			ch("18.1", "WDWO-CD", "MPEG2"),
 			ch("18.2", "WDWO-CD", "MPEG2"),
@@ -65,7 +65,7 @@ func TestAntennaOnlyChannelsSurviveAlongsideSpine(t *testing.T) {
 // same-named subchannels must still stand apart.
 func TestSameDeviceSameNameStaysSeparate(t *testing.T) {
 	l := Merge([]device.State{
-		state("flex", config.SourceAntenna,
+		state("antenna", config.SourceAntenna,
 			ch("18.1", "WDWO-CD", "MPEG2"),
 			ch("18.2", "WDWO-CD", "MPEG2"),
 			ch("18.3", "WDWO-CD", "MPEG2"),
@@ -87,8 +87,8 @@ func TestSameDeviceSameNameStaysSeparate(t *testing.T) {
 // antenna so cable tuners are conserved. The consumer never sees the swap.
 func TestSpineNamesTheChannelAndAntennaRoutesIt(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, ch("2", "WJBK", "MPEG2")),
-		state("flex", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
+		state("cable", config.SourceCable, ch("2", "WJBK", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
 	}, Options{})
 
 	if len(l.Channels) != 1 {
@@ -101,7 +101,7 @@ func TestSpineNamesTheChannelAndAntennaRoutesIt(t *testing.T) {
 	if c.Number != "2" || c.Name != "WJBK" {
 		t.Errorf("identity = %s %s, want cable's 2 WJBK so guide data matches", c.Number, c.Name)
 	}
-	if c.Candidates[0].Device != "flex" {
+	if c.Candidates[0].Device != "antenna" {
 		t.Errorf("first candidate is %q, want the antenna to conserve cable tuners", c.Candidates[0].Device)
 	}
 	if !c.FromSpine() {
@@ -114,12 +114,12 @@ func TestSpineNamesTheChannelAndAntennaRoutesIt(t *testing.T) {
 // with each other, but the antenna feed should serve both.
 func TestAntennaAttachesToBothCableListings(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable,
+		state("cable", config.SourceCable,
 			ch("4", "WDIV", "MPEG2"),
 			hdhr.Channel{GuideNumber: "232", GuideName: "WDIVDT", VideoCodec: "H264", AudioCodec: "AC3", HD: 1},
 			ch("294", "WDIVDT2", "MPEG2"), // a different subchannel, not a twin
 		),
-		state("flex", config.SourceAntenna,
+		state("antenna", config.SourceAntenna,
 			hdhr.Channel{GuideNumber: "4.1", GuideName: "WDIV-HD", VideoCodec: "MPEG2", AudioCodec: "AC3", HD: 1},
 		),
 	}, Options{})
@@ -134,8 +134,8 @@ func TestAntennaAttachesToBothCableListings(t *testing.T) {
 				number, len(c.Candidates))
 			continue
 		}
-		if c.Candidates[0].Device != "flex" {
-			t.Errorf("channel %s routes to %q first, want flex", number, c.Candidates[0].Device)
+		if c.Candidates[0].Device != "antenna" {
+			t.Errorf("channel %s routes to %q first, want the antenna", number, c.Candidates[0].Device)
 		}
 	}
 	// WDIVDT2 is a different programme and must not pick up the antenna feed.
@@ -161,8 +161,8 @@ func TestDigitalSuffixTrimmingIsGuarded(t *testing.T) {
 // The antenna suffixes callsigns with a transmission type; cable does not.
 func TestBroadcastSuffixIsStripped(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, ch("4", "WDIV", "MPEG2")),
-		state("flex", config.SourceAntenna, ch("4.1", "WDIV-HD", "MPEG2")),
+		state("cable", config.SourceCable, ch("4", "WDIV", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("4.1", "WDIV-HD", "MPEG2")),
 	}, Options{})
 	if len(l.Channels) != 1 {
 		t.Fatalf("WDIV-HD and WDIV should merge, got %d channels", len(l.Channels))
@@ -202,8 +202,8 @@ func TestSuffixOnlyStrippedWithSeparator(t *testing.T) {
 // twin: a stream that will not play is worth nothing, however cheap its tuner.
 func TestCompatibleCodecOutranksSourcePreference(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, ch("3", "WMYD", "MPEG2")),
-		state("flex", config.SourceAntenna, ch("120.1", "WMYD", "HEVC")),
+		state("cable", config.SourceCable, ch("3", "WMYD", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("120.1", "WMYD", "HEVC")),
 	}, Options{AllowATSC3: true})
 
 	c := l.Channels[0]
@@ -211,7 +211,7 @@ func TestCompatibleCodecOutranksSourcePreference(t *testing.T) {
 		t.Errorf("first candidate is %s, want the playable MPEG2 stream",
 			c.Candidates[0].VideoCodec)
 	}
-	if c.Candidates[0].Device != "prime" {
+	if c.Candidates[0].Device != "cable" {
 		t.Errorf("first candidate device = %q, want prime despite the antenna preference",
 			c.Candidates[0].Device)
 	}
@@ -228,30 +228,30 @@ func TestHDOutranksSourcePreference(t *testing.T) {
 
 	// Antenna is standard definition here, cable is high definition.
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, hd("7", "WXYZ")),
-		state("flex", config.SourceAntenna, ch("7.1", "WXYZ-HD", "MPEG2")),
+		state("cable", config.SourceCable, hd("7", "WXYZ")),
+		state("antenna", config.SourceAntenna, ch("7.1", "WXYZ-HD", "MPEG2")),
 	}, Options{})
 
 	c := l.Channels[0]
-	if c.Candidates[0].Device != "prime" {
+	if c.Candidates[0].Device != "cable" {
 		t.Errorf("routed to %q first, want the high definition cable feed",
 			c.Candidates[0].Device)
 	}
 
 	// With both high definition, the antenna wins on tuner economy.
 	l = Merge([]device.State{
-		state("prime", config.SourceCable, hd("7", "WXYZ")),
-		state("flex", config.SourceAntenna, hd("7.1", "WXYZ-HD")),
+		state("cable", config.SourceCable, hd("7", "WXYZ")),
+		state("antenna", config.SourceAntenna, hd("7.1", "WXYZ-HD")),
 	}, Options{})
 
-	if got := l.Channels[0].Candidates[0].Device; got != "flex" {
+	if got := l.Channels[0].Candidates[0].Device; got != "antenna" {
 		t.Errorf("routed to %q first, want flex once quality ties", got)
 	}
 }
 
 func TestProtectedChannelsExcluded(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable,
+		state("cable", config.SourceCable,
 			ch("2", "WJBK", "MPEG2"),
 			hdhr.Channel{GuideNumber: "999", GuideName: "LOCKED", VideoCodec: "MPEG2", DRM: 1},
 		),
@@ -272,7 +272,7 @@ func TestProtectedChannelsExcluded(t *testing.T) {
 // reliably, and every such channel here shadows an ATSC 1.0 twin that does.
 func TestATSC3ExcludedByDefault(t *testing.T) {
 	states := []device.State{
-		state("flex", config.SourceAntenna,
+		state("antenna", config.SourceAntenna,
 			ch("2.1", "WJBK", "MPEG2"),
 			hdhr.Channel{GuideNumber: "102.1", GuideName: "WJBK", VideoCodec: "HEVC", AudioCodec: "AC4"},
 			hdhr.Channel{GuideNumber: "104.1", GuideName: "WDIV", VideoCodec: "HEVC", AudioCodec: "AC4"},
@@ -297,7 +297,7 @@ func TestATSC3ExcludedByDefault(t *testing.T) {
 // next-generation would exclude a third of the lineup.
 func TestH264IsNotTreatedAsATSC3(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable, ch("36", "TRUTV", "H264")),
+		state("cable", config.SourceCable, ch("36", "TRUTV", "H264")),
 	}, Options{})
 
 	if l.Excluded.ATSC3 != 0 {
@@ -313,7 +313,7 @@ func TestH264IsNotTreatedAsATSC3(t *testing.T) {
 // would mask whether this rule works at all.
 func TestMobileVariantsExcluded(t *testing.T) {
 	l := Merge([]device.State{
-		state("flex", config.SourceAntenna,
+		state("antenna", config.SourceAntenna,
 			ch("7.1", "WXYZ-HD", "MPEG2"),
 			ch("107.99", "WXYZMOB", "HEVC"), // .99 subchannel and MOB callsign
 			ch("120.99", "WMYDMOB", "HEVC"),
@@ -350,17 +350,17 @@ func TestMobileDetection(t *testing.T) {
 }
 
 func TestUnreachableDeviceContributesNothing(t *testing.T) {
-	broken := state("prime", config.SourceCable, ch("2", "WJBK", "MPEG2"))
+	broken := state("cable", config.SourceCable, ch("2", "WJBK", "MPEG2"))
 	broken.Err = errors.New("probe failed")
 
 	l := Merge([]device.State{
 		broken,
-		state("flex", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
 	}, Options{})
 	if len(l.Channels) != 1 || len(l.Channels[0].Candidates) != 1 {
 		t.Fatalf("a failed probe must not contribute channels: %+v", l.Channels)
 	}
-	if l.Channels[0].Candidates[0].Device != "flex" {
+	if l.Channels[0].Candidates[0].Device != "antenna" {
 		t.Error("only the reachable device should appear")
 	}
 }
@@ -368,7 +368,7 @@ func TestUnreachableDeviceContributesNothing(t *testing.T) {
 // Viewers expect 9 before 10, and 2.2 before 2.10.
 func TestChannelOrdering(t *testing.T) {
 	l := Merge([]device.State{
-		state("prime", config.SourceCable,
+		state("cable", config.SourceCable,
 			ch("10", "TEN", "MPEG2"),
 			ch("9", "NINE", "MPEG2"),
 			ch("2.10", "B", "MPEG2"),
@@ -390,7 +390,7 @@ func TestChannelOrdering(t *testing.T) {
 
 func TestAsHDHomeRunPointsAtSourcery(t *testing.T) {
 	l := Merge([]device.State{
-		state("flex", config.SourceAntenna, hdhr.Channel{
+		state("antenna", config.SourceAntenna, hdhr.Channel{
 			GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", AudioCodec: "AC3", HD: 1,
 			URL: "http://192.0.2.10:5004/auto/v2.1",
 		}),

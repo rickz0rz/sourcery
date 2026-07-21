@@ -18,8 +18,8 @@ func write(t *testing.T, body string) string {
 
 func TestLoadValid(t *testing.T) {
 	cfg, err := Load(write(t, `{"devices":[
-		{"name":"flex","address":"192.0.2.10","source":"antenna"},
-		{"name":"prime","address":"192.0.2.11","source":"cable"}
+		{"name":"antenna","address":"192.0.2.10","source":"antenna"},
+		{"name":"cable","address":"192.0.2.11","source":"cable"}
 	]}`))
 	if err != nil {
 		t.Fatalf("Load: %v", err)

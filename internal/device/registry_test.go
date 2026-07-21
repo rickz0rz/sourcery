@@ -69,7 +69,7 @@ func TestProbeCollectsAllEndpoints(t *testing.T) {
 	defer srv.Close()
 
 	r := New(&config.Config{Devices: []config.Device{
-		{Name: "flex", Address: strings.TrimPrefix(srv.URL, "http://"), Source: config.SourceAntenna},
+		{Name: "antenna", Address: strings.TrimPrefix(srv.URL, "http://"), Source: config.SourceAntenna},
 	}})
 
 	states := r.Probe(context.Background())
@@ -98,14 +98,14 @@ func TestProbeIsolatesFailuresAndPreservesOrder(t *testing.T) {
 
 	r := New(&config.Config{Devices: []config.Device{
 		{Name: "dead", Address: strings.TrimPrefix(dead.URL, "http://"), Source: config.SourceCable},
-		{Name: "flex", Address: strings.TrimPrefix(srv.URL, "http://"), Source: config.SourceAntenna},
+		{Name: "antenna", Address: strings.TrimPrefix(srv.URL, "http://"), Source: config.SourceAntenna},
 	}})
 
 	states := r.Probe(context.Background())
 	if len(states) != 2 {
 		t.Fatalf("got %d states, want 2", len(states))
 	}
-	if states[0].Device.Name != "dead" || states[1].Device.Name != "flex" {
+	if states[0].Device.Name != "dead" || states[1].Device.Name != "antenna" {
 		t.Fatalf("results out of configuration order: %q, %q",
 			states[0].Device.Name, states[1].Device.Name)
 	}

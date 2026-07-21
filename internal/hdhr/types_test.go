@@ -5,14 +5,16 @@ import (
 	"testing"
 )
 
-// Fixtures below are verbatim responses captured from the real devices on
-// 2026-07-20, trimmed to a few entries. DeviceAuth values are redacted.
+// Fixtures below are real device responses, trimmed to a few entries, with
+// DeviceAuth redacted and addresses replaced with documentation ones. Keep new
+// fixtures real: the field-presence quirks they capture are the whole reason
+// these tests exist.
 
-const discoverPrime = `{"FriendlyName":"HDHomeRun PRIME","ModelNumber":"HDHR3-CC","FirmwareName":"hdhomerun3_cablecard","FirmwareVersion":"20260313","DeviceID":"1234ABC2","DeviceAuth":"redacted","BaseURL":"http://192.0.2.11","LineupURL":"http://192.0.2.11/lineup.json","TunerCount":3,"ConditionalAccess":1}`
+const discoverCableCard = `{"FriendlyName":"HDHomeRun PRIME","ModelNumber":"HDHR3-CC","FirmwareName":"hdhomerun3_cablecard","FirmwareVersion":"20260313","DeviceID":"1234ABC2","DeviceAuth":"redacted","BaseURL":"http://192.0.2.11","LineupURL":"http://192.0.2.11/lineup.json","TunerCount":3,"ConditionalAccess":1}`
 
 func TestDiscoverParsesCableCARDDevice(t *testing.T) {
 	var d Discover
-	if err := json.Unmarshal([]byte(discoverPrime), &d); err != nil {
+	if err := json.Unmarshal([]byte(discoverCableCard), &d); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if d.TunerCount != 3 {

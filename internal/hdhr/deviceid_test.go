@@ -2,18 +2,18 @@ package hdhr
 
 import "testing"
 
-// The two IDs below are the real devices on this network. They are the ground
-// truth that the checksum algorithm is right: both must validate, and a
-// single-nibble corruption of each must not.
-func TestValidDeviceIDMatchesRealDevices(t *testing.T) {
+// The first two IDs below were captured from working hardware, so they are
+// known good. They are the ground truth that the checksum algorithm is right:
+// both must validate, and a single-nibble corruption of each must not.
+func TestValidDeviceIDMatchesKnownGoodIDs(t *testing.T) {
 	tests := []struct {
 		id   uint32
 		want bool
 	}{
-		{0x1234ABC2, true},  // HDHomeRun PRIME
-		{0xABCDEF01, true},  // HDHomeRun FLEX 4K
-		{0x1234ABC3, false}, // PRIME, low nibble corrupted
-		{0xABCDEF00, false}, // FLEX, low nibble corrupted
+		{0x1234ABC2, true},  // captured from a CableCARD tuner
+		{0xABCDEF01, true},  // captured from an ATSC tuner
+		{0x1234ABC3, false}, // the first, low nibble corrupted
+		{0xABCDEF00, false}, // the second, low nibble corrupted
 		{0x12345678, false},
 		{0x00000000, false}, // reserved: unset
 		{0xFFFFFFFF, false}, // reserved: wildcard

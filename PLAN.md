@@ -6,18 +6,14 @@ with each other.
 
 ## Problem
 
-Three consumers — two Channels DVR instances and one Plex instance — each talk
-to the HDHomeRun devices directly and independently. They have no shared view of
-tuner usage, so they collide and exhaust a small tuner budget.
+Several consumers — DVR software such as Channels and Plex — each talk to the
+HDHomeRun devices directly and independently. They have no shared view of tuner
+usage, so they collide and exhaust a small tuner budget.
 
-**Hardware** (verified reachable 2026-07-20):
-
-| Device | Address | Tuners | Lineup | Notes |
-|---|---|---|---|---|
-| HDHomeRun PRIME (HDHR3-CC) | 192.0.2.11 | 3 | 492 cable channels | CableCARD; 7 DRM-protected |
-| HDHomeRun FLEX 4K (HDFX-4K) | 192.0.2.10 | 4 | 70 antenna channels | 3 DRM-protected |
-
-Seven tuners total for three consumers.
+The reference deployment this plan was written against is a CableCARD tuner
+(three tuners, a large cable lineup) alongside an ATSC 1.0/3.0 tuner (four
+tuners, a smaller broadcast lineup): seven tuners shared between three
+consumers. Nothing in the design depends on that particular arrangement.
 
 ## The constraint that shapes everything
 
@@ -26,8 +22,8 @@ Measured on both devices — two concurrent connections to the same channel
 consume two tuners:
 
 ```
-PRIME  /auto/v3    -> tuner1 (VctNumber 3) + tuner2 (VctNumber 3)
-FLEX   /auto/v2.1  -> tuner2 (VctNumber 2.1) + tuner3 (VctNumber 2.1)
+cable    /auto/v3    -> tuner1 (VctNumber 3) + tuner2 (VctNumber 3)
+antenna  /auto/v2.1  -> tuner2 (VctNumber 2.1) + tuner3 (VctNumber 2.1)
 ```
 
 This rules out the originally-sketched 302-redirect design. A redirect puts
@@ -46,7 +42,7 @@ Worth keeping separate; they have very different reach.
    tuner. Applies to *any* of the ~560 channels. This is the main win.
 2. **Source preference** — prefer antenna over cable when a channel exists on
    both, to conserve the scarcer 3-tuner cable budget. Only ~6 channels
-   genuinely qualify (WJBK, WDIV, WXYZ, WMYD, WWJ, CBET); the other overlap is
+   genuinely qualified on the reference fleet; the rest of the overlap was
    shopping channels.
 
 ## Architecture
@@ -55,8 +51,8 @@ Single Go binary, no external dependencies, targeting a Pi 4/5 (gigabit NIC).
 
 ```
   Channels A ─┐
-  Channels B ─┼─> Sourcery :5004 ─── arbiter ───> PRIME  192.0.2.11
-  Plex       ─┘   (HDHR emulation)    │      └──> FLEX   192.0.2.10
+  Channels B ─┼─> Sourcery :5004 ─── arbiter ───> cable device
+  Plex       ─┘   (HDHR emulation)    │      └──> antenna device
                                        └─ status poller
 ```
 
@@ -77,21 +73,21 @@ Single Go binary, no external dependencies, targeting a Pi 4/5 (gigabit NIC).
 
 ## Design notes worth getting right
 
-**Out-of-band usage is real.** During testing, `192.0.2.50` was streaming
-directly from the PRIME, bypassing Sourcery entirely. Tuner accounting must be
-derived from the devices' `status.json`, not from Sourcery's own bookkeeping
-alone — otherwise it will over-commit. Available = `TunerCount` − (in use per
-device).
+**Out-of-band usage is real.** During testing, another host on the network was
+streaming directly from a device, bypassing Sourcery entirely. Tuner accounting
+must be derived from the devices' `status.json`, not from Sourcery's own
+bookkeeping alone — otherwise it will over-commit. Available = `TunerCount` −
+(in use per device).
 
 **`VctNumber` is not a reliable key.** `status.json` reports the channel number
-the *stream* advertises, not the one requested. The live PRIME tuner showed
-`VctNumber 232` / `VctName WDIVDT` while the lineup lists WDIV at GuideNumber 4.
+the *stream* advertises, not the one requested. An observed tuner reported
+`VctNumber 232` / `VctName WDIVDT` while the lineup listed it at GuideNumber 4.
 Sourcery should track its own upstream connections directly and use `status.json`
 only for total occupancy and out-of-band detection — never to identify which
 managed stream holds a tuner.
 
 **Duplicate channels within a single source.** 179 cable names appear more than
-once (GVACC2 at 5/915/1090), and the antenna lists WJBK at both 2.1 and 102.1.
+once, and an antenna may list one station at two different numbers.
 Merge output should be a ranked *list* of `(device, guideNumber)` candidates per
 logical channel, so the arbiter can fall through when its first pick is busy.
 
@@ -108,8 +104,8 @@ the last subscriber disconnects.
 physical tuners succeed, the emulated `TunerCount` need not be 7. Make it
 configurable; start at 7 and revisit once reuse is proven.
 
-**DRM channels** (7 cable, 3 antenna) should be excluded or flagged — the
-consumers can't play them anyway.
+**DRM channels** should be excluded or flagged — the consumers can't play them
+anyway.
 
 ## Milestones
 

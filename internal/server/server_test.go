@@ -34,7 +34,7 @@ func testServerWithTuners(t *testing.T, tuners int, chans ...hdhr.Channel) *Serv
 		FriendlyName: "Sourcery",
 		TunerCount:   7,
 		Devices: []config.Device{
-			{Name: "flex", Address: "192.0.2.10", Source: config.SourceAntenna},
+			{Name: "antenna", Address: "192.0.2.10", Source: config.SourceAntenna},
 		},
 	}
 	states := []device.State{{
@@ -282,8 +282,8 @@ func TestFallsBackWhenUpstreamRefuses(t *testing.T) {
 	cfg := &config.Config{
 		FriendlyName: "Sourcery", TunerCount: 7,
 		Devices: []config.Device{
-			{Name: "flex", Address: "1.1.1.1", Source: config.SourceAntenna},
-			{Name: "prime", Address: "2.2.2.2", Source: config.SourceCable},
+			{Name: "antenna", Address: "1.1.1.1", Source: config.SourceAntenna},
+			{Name: "cable", Address: "2.2.2.2", Source: config.SourceCable},
 		},
 	}
 	states := []device.State{
@@ -338,7 +338,7 @@ func TestConfiguredDeviceIDIsUsed(t *testing.T) {
 	cfg := &config.Config{
 		FriendlyName: "Sourcery", TunerCount: 7,
 		DeviceID: "1234ABC2",
-		Devices:  []config.Device{{Name: "flex", Address: "1.2.3.4", Source: config.SourceAntenna}},
+		Devices:  []config.Device{{Name: "antenna", Address: "1.2.3.4", Source: config.SourceAntenna}},
 	}
 	s, err := New(cfg, arbiter.New(nil), slog.New(slog.DiscardHandler))
 	if err != nil {
