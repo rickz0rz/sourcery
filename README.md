@@ -33,10 +33,11 @@ reasoning and the milestone breakdown.
 
 ## Status
 
-**M0 — device registry and probing.** Sourcery does not serve anything yet.
+**M1 — Sourcery serves a discoverable tuner with a merged lineup.** Streaming
+is not implemented yet; stream requests return 503.
 
 - [x] **M0** Config, device registry, one-shot probe
-- [ ] **M1** Lineup merge and HDHomeRun emulation endpoints
+- [x] **M1** Lineup merge and HDHomeRun emulation endpoints
 - [ ] **M2** Passthrough proxy and arbitration
 - [ ] **M3** Stream reuse via fan-out
 - [ ] **M4** Status reconciliation and source preference
@@ -46,8 +47,15 @@ reasoning and the milestone breakdown.
 
 ```sh
 go build -o sourcery .
-./sourcery -config config.json
+./sourcery -config config.json          # serve the emulated tuner
+./sourcery -config config.json -probe   # report device state and exit
 ```
+
+Point Plex or Channels DVR at Sourcery's address as though it were an
+HDHomeRun. It serves `discover.json`, `lineup.json`, `lineup_status.json` and
+`device.xml` on port 5004.
+
+The probe report:
 
 ```
 DEVICE  ADDRESS        SOURCE   MODEL     TUNERS      CHANNELS  DRM
@@ -56,12 +64,36 @@ prime   192.0.2.11  cable    HDHR3-CC  3 free / 3  492       7
 
 6 of 7 tuners free
   flex/tuner2 in use by 192.0.2.30 (reports channel 2.1 WJBK)
+
+merged lineup: 535 channels, 15 available from more than one source
+excluded: 10 copy-protected, 2 ATSC 3.0 mobile feeds
+  2.1      WJBK         flex:2.1 ->  prime:2
+  4.1      WDIV-HD      flex:4.1 ->  prime:4
+  7.1      WXYZ-HD      flex:7.1 ->  prime:7
 ```
 
-That last line is a consumer streaming *directly* from a device, bypassing
-Sourcery. Tuner accounting is derived from each device's `status.json` rather
-than from Sourcery's own bookkeeping, precisely so that traffic it did not
-originate still counts against capacity.
+The `in use by` line is a consumer streaming *directly* from a device,
+bypassing Sourcery. Tuner accounting is derived from each device's
+`status.json` rather than from Sourcery's own bookkeeping, precisely so that
+traffic it did not originate still counts against capacity.
+
+## How the lineup is merged
+
+562 channels across the two devices become 535, with every station reachable
+from both sources listed once and its alternatives ranked.
+
+Entries merge **only across devices, never within one**: seven distinct
+WDWO-CD subchannels share a callsign on the antenna, and collapsing those by
+name would delete six channels. Names are matched after dropping a
+transmission-type suffix, so the antenna's `WDIV-HD` meets cable's `WDIV`.
+
+Candidates for a channel are ranked by playable codec first, then antenna
+before cable, then lowest channel number. Codec outranks source preference
+because the antenna's ATSC 3.0 channels are HEVC/AC4 — a stream that will not
+play is worth nothing, however cheap its tuner.
+
+Dropped entirely: copy-protected channels, which the consumers cannot play, and
+ATSC 3.0 mobile companion feeds (`.99` subchannels with `MOB` callsigns).
 
 ## Configuration
 
@@ -79,6 +111,11 @@ so a typo fails loudly instead of being ignored.
 
 `source` must be `antenna` or `cable`; it drives source preference when a
 channel is available from both.
+
+Optional keys: `listen` (default `:5004`), `friendly_name` (default
+`Sourcery`), `tuner_count` (default 7), `device_id` to pin the advertised
+identity, and `advertise_address` to override the host used in stream URLs when
+the request's own host is not reachable by consumers.
 
 ## Cross-compiling for the Pi
 

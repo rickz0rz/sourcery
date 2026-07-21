@@ -54,15 +54,33 @@ Re-verify if firmware changes (PRIME was on 20260313, FLEX 4K on 20260326).
   `HD`, `SignalStrength` and `SignalQuality`; the cable lineup carries none of
   them. `DRM` appears only on protected entries. Everything optional must decode
   to zero rather than being required.
+- **The antenna's 100+ channels are ATSC 3.0.** They are HEVC video with AC4
+  audio, unlike the MPEG2/AC3 ATSC 1.0 twins they shadow (102.1 shadows 2.1,
+  104.1 shadows 4.1, and so on), and three of them are DRM-protected. They are
+  *not* interchangeable with their twins — routing a consumer to one is likely
+  to fail outright. Codec compatibility therefore outranks source preference in
+  `rankCandidate`: a stream that will not play is worth nothing.
+- **ATSC 3.0 mobile feeds are excluded.** Companion streams for handheld devices
+  appear on a `.99` subchannel with a `MOB` callsign suffix (107.99 WXYZMOB,
+  120.99 WMYDMOB). They are never what a DVR wants.
 - **Duplicates are pervasive on both sources.** 179 cable names appear more than
-  once (GVACC2 at 5, 915 and 1090); the antenna lists WJBK at both 2.1 and
-  102.1. Channel merging must yield a *ranked list* of `(device, guideNumber)`
-  candidates per logical channel so the arbiter can fall through when its first
-  choice is busy.
-- **Only ~6 channels genuinely overlap both sources** (WJBK, WDIV, WXYZ, WMYD,
-  WWJ, CBET); the rest of the overlap is shopping channels. Source preference is
-  therefore a narrow optimization — stream reuse is the broad one, and the two
-  should not be conflated.
+  once (GVACC2 at 5, 915 and 1090); the antenna carries seven distinct WDWO-CD
+  subchannels at 18.1 through 18.7. **Merge across devices only, never within
+  one** — two numbers on one device are two channels even when the names match,
+  and collapsing them silently deletes channels. This bit once already.
+- **The two sources name stations differently.** The antenna suffixes callsigns
+  with a transmission type (`WDIV-HD`, `CHWI_HD`, `WDWO-CD`, `WUDT-LD`); cable
+  uses the bare callsign (`WDIV`). `normalizeName` strips such a suffix, but
+  only when a separator sets it off — cable's own `QVCHD` and `QVC` are
+  genuinely different channels and must not collapse.
+- **15 channels genuinely overlap both sources**, including all the main locals.
+  Source preference is still the narrower optimization; stream reuse is the
+  broad one, and the two should not be conflated.
+- **Device IDs carry a checksum.** Consumers reject malformed ones, so the
+  emulated ID must validate. See `internal/hdhr/deviceid.go`; the algorithm is
+  verified against both real device IDs in tests.
+- **Stream paths carry a `v` prefix.** `/auto/v2.1` means "tune virtual channel
+  2.1"; the `v` is not part of the number.
 
 ## Handling secrets
 

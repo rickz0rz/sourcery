@@ -40,8 +40,36 @@ type Device struct {
 
 // Config is the whole of Sourcery's configuration.
 type Config struct {
+	// Listen is the address Sourcery's emulated tuner serves on. Port 5004 is
+	// what HDHomeRun devices use, so consumers expect to find it there.
+	Listen string `json:"listen,omitempty"`
+
+	// FriendlyName is how Sourcery introduces itself to consumers.
+	FriendlyName string `json:"friendly_name,omitempty"`
+
+	// TunerCount is the tuner count Sourcery advertises. Because stream reuse
+	// lets more concurrent consumers succeed than there are physical tuners,
+	// this need not equal the fleet total.
+	TunerCount int `json:"tuner_count,omitempty"`
+
+	// DeviceID overrides the derived device ID, as eight hex digits. It must
+	// satisfy the HDHomeRun checksum. Leave unset to derive one.
+	DeviceID string `json:"device_id,omitempty"`
+
+	// AdvertiseAddress overrides the host:port Sourcery puts in the stream URLs
+	// it hands out. Leave unset to use whatever host the consumer asked for,
+	// which is correct on a normal LAN.
+	AdvertiseAddress string `json:"advertise_address,omitempty"`
+
 	Devices []Device `json:"devices"`
 }
+
+// Defaults applied when the config leaves a field unset.
+const (
+	DefaultListen       = ":5004"
+	DefaultFriendlyName = "Sourcery"
+	DefaultTunerCount   = 7
+)
 
 // Load reads and validates the config file at path.
 func Load(path string) (*Config, error) {
@@ -56,15 +84,31 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	c.applyDefaults()
 	if err := c.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &c, nil
 }
 
+func (c *Config) applyDefaults() {
+	if c.Listen == "" {
+		c.Listen = DefaultListen
+	}
+	if c.FriendlyName == "" {
+		c.FriendlyName = DefaultFriendlyName
+	}
+	if c.TunerCount == 0 {
+		c.TunerCount = DefaultTunerCount
+	}
+}
+
 func (c *Config) validate() error {
 	if len(c.Devices) == 0 {
 		return fmt.Errorf("no devices configured")
+	}
+	if c.TunerCount < 1 {
+		return fmt.Errorf("tuner_count must be at least 1, got %d", c.TunerCount)
 	}
 
 	seenName := make(map[string]bool, len(c.Devices))
