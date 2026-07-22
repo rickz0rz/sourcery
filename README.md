@@ -28,14 +28,14 @@ reasoning and the milestone breakdown.
 
 ## Status
 
-**M2 — Sourcery streams.** Consumers can discover it, scan its lineup, and play
-live television through it. Each consumer still gets its own tuner; sharing one
-upstream between several consumers is M3.
+**M3 — Sourcery shares tuners.** Consumers watching the same channel share one
+upstream connection, so three consumers of one channel occupy one tuner instead
+of three.
 
 - [x] **M0** Config, device registry, one-shot probe
 - [x] **M1** Lineup merge and HDHomeRun emulation endpoints
 - [x] **M2** Passthrough proxy and arbitration
-- [ ] **M3** Stream reuse via fan-out
+- [x] **M3** Stream reuse via fan-out
 - [ ] **M4** Grace periods and richer reconciliation
 - [ ] **M5** Manual lineup overrides and operability
 
@@ -175,6 +175,31 @@ opening a stream fails, Sourcery releases the claim and tries the next
 candidate. When no candidate works it answers 503 rather than tearing down a
 stream that is already playing. Nothing in flight is ever interrupted, and the
 refusal is logged so contention is visible.
+
+## How tuners are shared
+
+When a consumer asks for a channel that Sourcery is already receiving, it joins
+the existing stream rather than opening a second connection — so three
+consumers of one channel occupy one tuner:
+
+```
+flex ch 2.1  3 consumer(s) on 1 tuner
+```
+
+The reuse key is the upstream feed, not the channel number, so two different
+listings that resolve to the same device feed — a station's standard and high
+definition entries, say — also share a tuner. Requests that arrive at the same
+instant for the same channel converge on one connection rather than racing to
+open several.
+
+Reuse is preferred over source preference: joining an open stream costs no tuner
+at all, which conserves capacity better than picking the nominally preferred
+source would.
+
+One reader pulls from each upstream and fans its bytes out to every consumer. A
+consumer that cannot keep up with the real-time stream is dropped rather than
+allowed to stall the reader or the others; its player can reconnect. When the
+last consumer of a stream leaves, the upstream is closed and its tuner released.
 
 ## Cross-compiling for a Raspberry Pi
 

@@ -6,6 +6,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"sourcery/internal/config"
 	"sourcery/internal/hdhr"
 	"sourcery/internal/lineup"
+	"sourcery/internal/relay"
 	"sourcery/internal/stream"
 )
 
@@ -28,7 +30,7 @@ type Server struct {
 	deviceID string
 	log      *slog.Logger
 	arbiter  *arbiter.Arbiter
-	proxy    *stream.Proxy
+	hub      *relay.Hub
 
 	mu      sync.RWMutex
 	current lineup.Lineup
@@ -58,8 +60,20 @@ func New(cfg *config.Config, arb *arbiter.Arbiter, log *slog.Logger) (*Server, e
 		deviceID: hdhr.FormatDeviceID(id),
 		log:      log,
 		arbiter:  arb,
-		proxy:    stream.NewProxy(),
+		hub:      relay.NewHub(arb, proxyOpener{stream.NewProxy()}, log),
 	}, nil
+}
+
+// proxyOpener adapts a *stream.Proxy to relay.Opener, whose Open returns the
+// relay.Upstream interface rather than the concrete type.
+type proxyOpener struct{ p *stream.Proxy }
+
+func (o proxyOpener) Open(ctx context.Context, url string) (relay.Upstream, error) {
+	up, err := o.p.Open(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	return up, nil
 }
 
 // DeviceID returns the identity Sourcery presents to consumers.
@@ -168,15 +182,11 @@ func (s *Server) handleDeviceXML(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, deviceXML, s.baseURL(r), s.cfg.FriendlyName, s.deviceID)
 }
 
-// handleStream routes a stream request to the best available source.
+// handleStream routes a stream request to the best available source, reusing an
+// upstream that is already open for the channel when one exists.
 //
 // Stream paths are of the form /auto/v2.1, where the "v" prefix means "tune by
 // virtual channel number" and is not part of the number itself.
-//
-// Candidates are tried in preference order. A candidate is skipped when its
-// device has no spare tuner, and also when opening the upstream fails: the
-// arbiter's view of foreign usage is always slightly stale, so the device
-// itself is the final authority on whether a tuner was really free.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	number := strings.TrimPrefix(r.PathValue("channel"), "v")
 	consumer := clientIP(r)
@@ -189,55 +199,61 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, cand := range ch.Candidates {
-		lease, ok := s.arbiter.TryAcquire(cand)
-		if !ok {
-			continue // that device is full
-		}
-
-		up, err := s.proxy.Open(r.Context(), cand.URL)
-		if err != nil {
-			lease.Release()
-			s.log.Warn("upstream refused; trying the next source",
-				"consumer", consumer, "channel", number,
-				"device", cand.Device, "device_channel", cand.GuideNumber, "error", err)
-			continue
-		}
-
-		s.serveStream(w, r, ch, cand, up, lease)
+	sub, err := s.hub.Subscribe(ch)
+	if err != nil {
+		// Never tear down a stream in flight to make room for a new one.
+		// Refusing is honest, and the log line is what makes contention visible.
+		s.log.Warn("no tuner available for stream request",
+			"consumer", consumer, "channel", number, "name", ch.Name,
+			"candidates", len(ch.Candidates), "capacity", s.arbiter.Snapshot(), "error", err)
+		http.Error(w, "no tuner available", http.StatusServiceUnavailable)
 		return
 	}
+	defer sub.Close()
 
-	// Never tear down a stream in flight to make room for a new one. Refusing
-	// is honest, and the log line is what makes contention visible.
-	s.log.Warn("no tuner available for stream request",
-		"consumer", consumer, "channel", number, "name", ch.Name,
-		"candidates", len(ch.Candidates), "capacity", s.arbiter.Snapshot())
-	http.Error(w, "no tuner available", http.StatusServiceUnavailable)
-}
-
-// serveStream relays an open upstream to the consumer and accounts for it.
-func (s *Server) serveStream(w http.ResponseWriter, r *http.Request,
-	ch lineup.Channel, cand lineup.Candidate, up *stream.Upstream, lease *arbiter.Lease,
-) {
-	defer up.Close()
-	defer lease.Release()
-
-	consumer := clientIP(r)
 	s.log.Info("streaming",
 		"consumer", consumer, "channel", ch.Number, "name", ch.Name,
-		"device", cand.Device, "source", cand.Source, "device_channel", cand.GuideNumber)
+		"device", sub.Candidate.Device, "source", sub.Candidate.Source,
+		"device_channel", sub.Candidate.GuideNumber, "reused", sub.Reused)
 
 	w.Header().Set("Content-Type", stream.ContentType)
 	w.WriteHeader(http.StatusOK)
 
 	started := time.Now()
-	n, err := up.CopyTo(w)
+	n := s.pump(w, r, sub)
 
 	s.log.Info("stream ended",
 		"consumer", consumer, "channel", ch.Number,
-		"device", cand.Device, "bytes", n,
-		"seconds", int(time.Since(started).Seconds()), "error", err)
+		"device", sub.Candidate.Device, "bytes", n,
+		"seconds", int(time.Since(started).Seconds()))
+}
+
+// pump forwards a subscription's chunks to the consumer until the stream ends
+// or the consumer disconnects. It returns the number of bytes written.
+//
+// Each chunk is flushed rather than buffered, because a consumer waiting on a
+// live stream should not wait for a buffer to fill before playback starts.
+func (s *Server) pump(w http.ResponseWriter, r *http.Request, sub *relay.Subscription) int64 {
+	rc := http.NewResponseController(w)
+	var total int64
+	for {
+		select {
+		case chunk, ok := <-sub.Chunks():
+			if !ok {
+				return total // the stream ended, or this consumer was dropped
+			}
+			n, err := w.Write(chunk)
+			total += int64(n)
+			if err != nil {
+				return total // the consumer went away; how essentially every stream ends
+			}
+			if err := rc.Flush(); err != nil {
+				return total
+			}
+		case <-r.Context().Done():
+			return total
+		}
+	}
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +270,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	for _, st := range s.arbiter.Snapshot() {
 		fmt.Fprintf(w, "  %-8s %d free of %d  (%d held by sourcery, %d elsewhere)\n",
 			st.Device, st.Free, st.Tuners, st.Held, st.Foreign)
+	}
+
+	if live := s.hub.Snapshot(); len(live) > 0 {
+		fmt.Fprintln(w, "\nlive streams:")
+		for _, st := range live {
+			fmt.Fprintf(w, "  %s ch %s  %d consumer(s) on 1 tuner\n",
+				st.Candidate.Device, st.Candidate.GuideNumber, st.Subscribers)
+		}
 	}
 }
 

@@ -9,7 +9,6 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,10 +19,11 @@ import (
 // ContentType is what HDHomeRun devices serve and what consumers expect.
 const ContentType = "video/mp2t"
 
-// bufferSize is a whole number of 188-byte transport stream packets, close to
-// 64 KiB. Copying in packet-aligned chunks keeps partial packets out of the
-// buffer boundaries.
-const bufferSize = 188 * 348
+// ReadSize is a whole number of 188-byte transport stream packets, close to
+// 64 KiB. Reading in packet-aligned chunks keeps partial packets off the
+// boundaries, which matters when the same chunk is fanned out to several
+// consumers.
+const ReadSize = 188 * 348
 
 // Proxy opens upstream streams and relays them.
 type Proxy struct {
@@ -76,44 +76,13 @@ func (p *Proxy) Open(ctx context.Context, url string) (*Upstream, error) {
 	return &Upstream{body: resp.Body}, nil
 }
 
-// CopyTo relays the stream to w until the consumer disconnects, the device
-// stops sending, or the request context is cancelled. It returns the number of
-// bytes relayed.
-//
-// Each chunk is flushed rather than buffered, because a consumer waiting on a
-// live stream should not have to wait for a buffer to fill before playback
-// starts.
-func (u *Upstream) CopyTo(w http.ResponseWriter) (int64, error) {
-	rc := http.NewResponseController(w)
-	buf := make([]byte, bufferSize)
-
-	var total int64
-	for {
-		n, readErr := u.body.Read(buf)
-		if n > 0 {
-			written, writeErr := w.Write(buf[:n])
-			total += int64(written)
-			if writeErr != nil {
-				// The consumer went away. Normal, and not worth reporting as a
-				// failure: it is how every stream ends.
-				return total, nil
-			}
-			if err := rc.Flush(); err != nil {
-				return total, nil
-			}
-		}
-		if readErr != nil {
-			// A consumer disconnecting cancels the request, which cancels the
-			// upstream read. That is how essentially every stream ends, so it
-			// is not a failure -- reporting it as one would bury the real
-			// errors among the routine ones.
-			if errors.Is(readErr, io.EOF) || errors.Is(readErr, context.Canceled) {
-				return total, nil
-			}
-			return total, readErr
-		}
-	}
-}
+// Read reads the next chunk of the stream. It returns io.EOF when the device
+// stops sending, and a context or network error if the connection is closed
+// underneath it -- which is exactly how the reader is told to stop when the
+// last consumer of a stream disconnects.
+func (u *Upstream) Read(p []byte) (int, error) { return u.body.Read(p) }
 
 // Close releases the upstream connection, and with it the device's tuner.
+// Closing also unblocks a Read in progress, which is how a fan-out reader is
+// stopped once nobody is watching.
 func (u *Upstream) Close() error { return u.body.Close() }

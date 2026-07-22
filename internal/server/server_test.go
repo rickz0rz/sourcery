@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -231,43 +233,113 @@ func TestTunerIsReleasedAfterStreaming(t *testing.T) {
 	}
 }
 
-// Never tear down a stream in flight to make room for a new one; refuse
-// instead. This is the contention policy, and it has to be observable.
-func TestRefusesWhenNoTunerIsFree(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// holdOpen serves a stream that stays open until the returned func is called,
+// so a tuner can be kept occupied for the duration of a test.
+func holdOpen(t *testing.T) (url string, release func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("x"))
 		http.NewResponseController(w).Flush()
-		<-release // hold the tuner open
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
 	}))
-	defer srv.Close()
-	defer close(release)
+	t.Cleanup(srv.Close)
+	return srv.URL, func() { once.Do(func() { close(done) }) }
+}
+
+// streamInBackground starts a cancellable streaming request and returns a func
+// to end it. Streams block until the consumer disconnects, so tests drive them
+// this way and assert on the server's own accounting rather than on a response
+// body that will not complete.
+func streamInBackground(t *testing.T, s *Server, path string) (cancel func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest(http.MethodGet, "http://x"+path, nil).WithContext(ctx)
+		s.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	return cancel
+}
+
+// waitFor polls until cond holds, failing the test if it never does.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for range 200 {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func heldOn(s *Server, device string) int {
+	for _, st := range s.arbiter.Snapshot() {
+		if st.Device == device {
+			return st.Held
+		}
+	}
+	return -1
+}
+
+// Never tear down a stream in flight to make room for a new one; refuse
+// instead. A different channel on a single-tuner device has nowhere to go.
+func TestRefusesWhenNoTunerIsFree(t *testing.T) {
+	url, release := holdOpen(t)
+	defer release()
+
+	s := testServerWithTuners(t, 1,
+		hdhr.Channel{GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: url},
+		hdhr.Channel{GuideNumber: "5.1", GuideName: "WKAR", VideoCodec: "MPEG2", URL: url + "/other"},
+	)
+
+	streamInBackground(t, s, "/auto/v2.1")
+	waitFor(t, "the first stream to take the tuner", func() bool { return heldOn(s, "antenna") == 1 })
+
+	if resp := get(t, s, "/auto/v5.1"); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %s, want 503 when the only tuner is busy", resp.Status)
+	}
+}
+
+// The heart of M3: a second consumer of a channel already being received joins
+// the existing upstream instead of taking another tuner.
+func TestSecondConsumerReusesTheTuner(t *testing.T) {
+	url, release := holdOpen(t)
+	defer release()
 
 	s := testServerWithTuners(t, 1, hdhr.Channel{
-		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: srv.URL,
+		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: url,
 	})
 
-	// Occupy the single tuner.
-	started := make(chan struct{})
-	go func() {
-		req := httptest.NewRequest(http.MethodGet, "http://x/auto/v2.1", nil)
-		rec := httptest.NewRecorder()
-		close(started)
-		s.Handler().ServeHTTP(rec, req)
-	}()
-	<-started
+	// Two consumers of the same channel, on a device with a single tuner.
+	streamInBackground(t, s, "/auto/v2.1")
+	waitFor(t, "one subscriber", func() bool { return subscribers(s) == 1 })
+	streamInBackground(t, s, "/auto/v2.1")
+	waitFor(t, "the second consumer to join", func() bool { return subscribers(s) == 2 })
 
-	// Wait for the lease to be taken before asking for a second stream.
-	for range 100 {
-		if s.arbiter.Snapshot()[0].Held > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The second joined rather than failing, and both share one tuner.
+	if held := heldOn(s, "antenna"); held != 1 {
+		t.Errorf("%d tuners held, want exactly 1 shared between both consumers", held)
 	}
+	live := s.hub.Snapshot()
+	if len(live) != 1 || live[0].Subscribers != 2 {
+		t.Errorf("hub snapshot = %+v, want one stream with 2 subscribers", live)
+	}
+}
 
-	if resp := get(t, s, "/auto/v2.1"); resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status = %s, want 503 when every tuner is busy", resp.Status)
+func subscribers(s *Server) int {
+	var n int
+	for _, st := range s.hub.Snapshot() {
+		n += st.Subscribers
 	}
+	return n
 }
 
 // The arbiter's view of foreign usage is always slightly stale, so a device may

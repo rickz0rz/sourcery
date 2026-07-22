@@ -21,13 +21,32 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
 - **Layout.** `main.go` at the root stays thin; real work lives in
   `internal/{config,device,hdhr}`.
 - **`internal/hdhr` is control-plane only.** It speaks to the devices' JSON
-  endpoints. Streaming lives in `internal/stream`, and deciding which tuner to
-  use lives in `internal/arbiter` — because a device allocates a tuner per
-  connection, stream lifetime is an arbitration concern, not a client one.
-- **Every acquired lease must be released exactly once.** `Lease.Release` is
-  idempotent and the handler defers it, but a path that acquires and then fails
-  before streaming has to release explicitly or that tuner is lost until
-  restart. The fallback path in `handleStream` is the case to watch.
+  endpoints. Streaming lives in `internal/stream`, deciding which tuner to use
+  lives in `internal/arbiter`, and sharing one upstream among consumers lives in
+  `internal/relay` — because a device allocates a tuner per connection, stream
+  lifetime is an arbitration concern, not a client one.
+- **`internal/relay` owns the lease for a shared stream.** One `arbiter.Lease`
+  is held per upstream (`broadcast`), not per consumer, and released by the
+  reader's `finish` when the last consumer leaves. Nothing outside the hub
+  should acquire or release a lease on a streaming path. If open fails during
+  `create`, that candidate's lease is released before trying the next.
+- **The reuse key is the upstream URL, not the channel number.** Two presented
+  channels that resolve to the same device feed must share one tuner. Keying by
+  channel number would open a second tuner to a feed already being received.
+- **The upstream must outlive the request that started it.** `create` opens with
+  `context.Background()`, never the requester's context — otherwise the consumer
+  who happened to start a shared stream would tear it down for everyone by
+  disconnecting. Per-consumer lifetime is the subscriber, not the upstream.
+- **One reader per upstream, fresh buffer per read.** The chunk is fanned out to
+  every subscriber and read concurrently, so it must not be overwritten by the
+  next read. Sends to subscribers are non-blocking; a subscriber whose buffer
+  fills is dropped, so one slow consumer can never stall the reader or others.
+- **Never set a write timeout on the HTTP server or the stream client.** A
+  stream stays open for as long as someone is watching; a deadline would cut it
+  off mid-programme. Only connect and response-header phases are bounded.
+- **A cancelled request is a normal stream ending, not an error.** Consumers
+  disconnect constantly; the `pump` loop treats a closed chunk channel or a
+  write error as a routine end, not a failure to log.
 - **Never set a write timeout on the HTTP server or the stream client.** A
   stream stays open for as long as someone is watching; a deadline would cut it
   off mid-programme. Only connect and response-header phases are bounded.
