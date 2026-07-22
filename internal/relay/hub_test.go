@@ -52,6 +52,7 @@ type fakeProxy struct {
 	mu       sync.Mutex
 	streams  map[string]*fakeUpstream
 	opens    map[string]int
+	headers  map[string]map[string]string // headers seen per URL
 	failURLs map[string]bool
 	openCh   chan struct{} // if non-nil, Open blocks until it is signalled
 }
@@ -60,17 +61,19 @@ func newFakeProxy() *fakeProxy {
 	return &fakeProxy{
 		streams:  make(map[string]*fakeUpstream),
 		opens:    make(map[string]int),
+		headers:  make(map[string]map[string]string),
 		failURLs: make(map[string]bool),
 	}
 }
 
-func (p *fakeProxy) Open(ctx context.Context, url string) (Upstream, error) {
+func (p *fakeProxy) Open(ctx context.Context, url string, headers map[string]string) (Upstream, error) {
 	if p.openCh != nil {
 		<-p.openCh
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.opens[url]++
+	p.headers[url] = headers
 	if p.failURLs[url] {
 		return nil, errors.New("device refused")
 	}
@@ -114,6 +117,10 @@ func channel(name string, cands ...lineup.Candidate) lineup.Channel {
 
 func cand(device, number, url string) lineup.Candidate {
 	return lineup.Candidate{Device: device, GuideNumber: number, URL: url}
+}
+
+func webCand(url string, headers map[string]string) lineup.Candidate {
+	return lineup.Candidate{Device: "web", URL: url, Web: true, Headers: headers}
 }
 
 func TestSingleConsumerOpensOneStream(t *testing.T) {
@@ -417,6 +424,47 @@ func TestGracePeriodExpiresAndReleasesTuner(t *testing.T) {
 
 	waitFor(t, func() bool { return held(hub, "antenna") == 0 },
 		"the tuner to be released after the grace period")
+}
+
+// A web stream is used only when the tuner ahead of it is gone, takes no tuner
+// lease, and carries its configured headers.
+func TestWebStreamIsLastResortAndCarriesHeaders(t *testing.T) {
+	proxy := newFakeProxy()
+	hub := testHub(t, proxy, map[string]int{"antenna": 1})
+
+	headers := map[string]string{"Referer": "https://example.test/"}
+	// The web-backed channel prefers its tuner, then falls to the web stream.
+	webChannel := channel("5.1",
+		cand("antenna", "5.1", "tunerB"),
+		webCand("https://example.test/live.ts", headers),
+	)
+
+	// Occupy the single tuner with a different channel, so the web-backed
+	// channel cannot get a tuner and cannot reuse an existing stream.
+	other, err := hub.Subscribe(channel("2.1", cand("antenna", "2.1", "tunerA")), "a")
+	if err != nil {
+		t.Fatalf("occupying stream: %v", err)
+	}
+	defer other.Close()
+
+	// Its tuner candidate cannot be acquired, so it falls through to the web
+	// stream -- which needs no tuner.
+	second, err := hub.Subscribe(webChannel, "b")
+	if err != nil {
+		t.Fatalf("web-backed subscribe: %v", err)
+	}
+	defer second.Close()
+
+	if !second.Candidate.Web {
+		t.Fatalf("consumer used %q, want the web fallback", second.Candidate.Device)
+	}
+	// The web stream took no tuner: the device still shows just the one held.
+	if h := held(hub, "antenna"); h != 1 {
+		t.Errorf("held = %d, want 1 (the web stream must not take a tuner)", h)
+	}
+	if got := proxy.headers["https://example.test/live.ts"]["Referer"]; got != "https://example.test/" {
+		t.Errorf("Referer sent = %q, want the configured value", got)
+	}
 }
 
 func held(hub *Hub, device string) int {

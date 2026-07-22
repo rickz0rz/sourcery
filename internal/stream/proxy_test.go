@@ -18,7 +18,7 @@ func TestOpenRejectsErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := NewProxy().Open(context.Background(), srv.URL); err == nil {
+	if _, err := NewProxy().Open(context.Background(), srv.URL, nil); err == nil {
 		t.Fatal("expected an error for a 503 response")
 	}
 }
@@ -27,7 +27,7 @@ func TestOpenFailsOnUnreachableDevice(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // refuse connections
 
-	if _, err := NewProxy().Open(context.Background(), srv.URL); err == nil {
+	if _, err := NewProxy().Open(context.Background(), srv.URL, nil); err == nil {
 		t.Fatal("expected an error for a refused connection")
 	}
 }
@@ -41,7 +41,7 @@ func TestReadDeliversTheStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up, err := NewProxy().Open(context.Background(), srv.URL)
+	up, err := NewProxy().Open(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up, err := NewProxy().Open(context.Background(), srv.URL)
+	up, err := NewProxy().Open(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

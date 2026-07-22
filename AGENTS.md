@@ -37,6 +37,13 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
   Grace `0` restores immediate teardown. All state changes (`draining`,
   `closed`, the timer) are under `broadcast.mu`; the timer callback re-checks
   emptiness under the lock, since a `join` can race it.
+- **Web stream candidates take no tuner.** A candidate with `Web: true` skips
+  `arbiter.TryAcquire` in `create` and its `broadcast.lease` is nil (which
+  `Lease.Release` guards). It ranks below every tuner in `rankCandidate`, so it
+  serves only when the tuners are exhausted, and it carries `Headers` through
+  `Opener.Open` for streams that require a specific Referer or User-Agent.
+  Sourcery relays bytes as-is, so this only handles direct transport streams,
+  not HLS playlists.
 - **The reuse key is the upstream URL, not the channel number.** Two presented
   channels that resolve to the same device feed must share one tuner. Keying by
   channel number would open a second tuner to a feed already being received.

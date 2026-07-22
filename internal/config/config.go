@@ -49,6 +49,22 @@ type Mapping struct {
 	Source ChannelRef `json:"source"`
 }
 
+// Stream attaches an external web stream to a presented channel as a last
+// resort, used only when every physical tuner for that channel is busy. Because
+// it does not consume a tuner, it can serve when nothing else can.
+//
+// Sourcery relays the URL's bytes as-is, which works for a direct transport
+// stream but not for an HLS playlist. Headers are sent with the request, which
+// is how a stream that demands a particular Referer or User-Agent is satisfied.
+type Stream struct {
+	// Channel is the presented channel number this stream backs.
+	Channel string `json:"channel"`
+	// URL is the stream to fetch.
+	URL string `json:"url"`
+	// Headers are extra request headers, e.g. {"Referer": "https://..."}.
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
 // Source describes where a device gets its signal. It drives source
 // preference: when a channel is available from more than one device, the
 // scarcer cable tuners are conserved by preferring antenna.
@@ -118,6 +134,9 @@ type Config struct {
 
 	// Exclude drops specific channels from the lineup by device and number.
 	Exclude []ChannelRef `json:"exclude,omitempty"`
+
+	// Streams attach external web streams as a last-resort source for a channel.
+	Streams []Stream `json:"streams,omitempty"`
 
 	Devices []Device `json:"devices"`
 }
@@ -216,6 +235,14 @@ func (c *Config) validate() error {
 		}
 		if !seenName[e.Device] {
 			return fmt.Errorf("exclude[%d]: device %q is not a configured device", i, e.Device)
+		}
+	}
+	for i, s := range c.Streams {
+		if s.Channel == "" {
+			return fmt.Errorf("streams[%d]: channel is required", i)
+		}
+		if s.URL == "" {
+			return fmt.Errorf("streams[%d]: url is required", i)
 		}
 	}
 	return nil

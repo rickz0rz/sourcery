@@ -16,13 +16,20 @@ import (
 // Candidate is one concrete way to receive a logical channel: a specific
 // channel number on a specific device.
 type Candidate struct {
-	Device      string        // configured device name
+	Device      string        // configured device name, or "web" for a web stream
 	Source      config.Source // where that device gets its signal
 	GuideNumber string        // the channel number on that device
 	URL         string        // upstream stream URL on that device
 	VideoCodec  string
 	AudioCodec  string
 	HD          bool
+
+	// Web marks a candidate that is an external stream rather than a device
+	// tuner: it consumes no tuner and is only ever used as a last resort.
+	Web bool
+	// Headers are extra request headers for a web stream, e.g. a required
+	// Referer. Empty for device candidates.
+	Headers map[string]string
 }
 
 // Channel is a logical channel: an identity as consumers see it, plus every
@@ -56,6 +63,10 @@ type Lineup struct {
 	// UnmatchedMappings are configured mappings whose target channel or source
 	// could not be found, so the operator can be told they had no effect.
 	UnmatchedMappings []config.Mapping
+
+	// UnmatchedStreams are configured web streams whose target channel does not
+	// exist in the lineup.
+	UnmatchedStreams []config.Stream
 }
 
 // Exclusions breaks down the channels left out of the merged lineup.
@@ -82,6 +93,9 @@ type Options struct {
 
 	// Exclude drops specific channels by device and guide number.
 	Exclude []config.ChannelRef
+
+	// Streams attach external web streams as a last-resort source.
+	Streams []config.Stream
 }
 
 // refKey identifies a channel on a device for exclusion and mapping lookups.
@@ -127,16 +141,22 @@ func compatible(videoCodec string) bool {
 // rankCandidate orders the ways of receiving one logical channel. Lower sorts
 // first. The ordering is, in priority order:
 //
-//  1. playable codec before exotic codec
-//  2. high definition before standard definition
-//  3. antenna before cable, to conserve the scarcer cable tuners
-//  4. lower channel number, which is usually the canonical listing
+//  1. a real tuner before a web stream, which is only ever a last resort
+//  2. playable codec before exotic codec
+//  3. high definition before standard definition
+//  4. antenna before cable, to conserve the scarcer cable tuners
+//  5. lower channel number, which is usually the canonical listing
 //
+// A web stream ranks below every tuner because it is an off-air fallback of
+// unknown quality and reliability; it exists to serve when the tuners cannot.
 // Picture quality outranks tuner economy: a viewer notices a standard
 // definition picture, and will not notice which tuner produced it. Both devices
 // report the HD flag, so the comparison is meaningful in both directions --
 // an HD cable feed is preferred over a standard definition antenna one.
 func rankCandidate(a, b Candidate) int {
+	if n := cmp.Compare(webRank(a), webRank(b)); n != 0 {
+		return n
+	}
 	if n := cmp.Compare(codecRank(a), codecRank(b)); n != 0 {
 		return n
 	}
@@ -147,6 +167,13 @@ func rankCandidate(a, b Candidate) int {
 		return n
 	}
 	return compareChannelNumbers(a.GuideNumber, b.GuideNumber)
+}
+
+func webRank(c Candidate) int {
+	if c.Web {
+		return 1
+	}
+	return 0
 }
 
 func codecRank(c Candidate) int {
@@ -351,7 +378,8 @@ func Merge(states []device.State, opts Options) Lineup {
 		}
 	}
 
-	unmatched := applyMappings(channels, opts.Mappings, byRef)
+	unmatchedMappings := applyMappings(channels, opts.Mappings, byRef)
+	unmatchedStreams := applyStreams(channels, opts.Streams)
 
 	slices.SortStableFunc(channels, func(a, b Channel) int {
 		if n := compareChannelNumbers(a.Number, b.Number); n != 0 {
@@ -360,7 +388,44 @@ func Merge(states []device.State, opts Options) Lineup {
 		return cmp.Compare(a.Name, b.Name)
 	})
 
-	return Lineup{Channels: channels, Excluded: excluded, UnmatchedMappings: unmatched}
+	return Lineup{
+		Channels:          channels,
+		Excluded:          excluded,
+		UnmatchedMappings: unmatchedMappings,
+		UnmatchedStreams:  unmatchedStreams,
+	}
+}
+
+// applyStreams attaches each configured web stream to its target channel as a
+// last-resort candidate. Because a web stream ranks below every tuner, it only
+// serves when the tuners for that channel are exhausted. A stream whose target
+// channel is not present is returned as unmatched.
+func applyStreams(channels []Channel, streams []config.Stream) []config.Stream {
+	if len(streams) == 0 {
+		return nil
+	}
+
+	byNumber := make(map[string]*Channel, len(channels))
+	for i := range channels {
+		byNumber[channels[i].Number] = &channels[i]
+	}
+
+	var unmatched []config.Stream
+	for _, s := range streams {
+		target, ok := byNumber[s.Channel]
+		if !ok {
+			unmatched = append(unmatched, s)
+			continue
+		}
+		target.Candidates = append(target.Candidates, Candidate{
+			Device:  "web",
+			URL:     s.URL,
+			Headers: s.Headers,
+			Web:     true,
+		})
+		slices.SortStableFunc(target.Candidates, rankCandidate)
+	}
+	return unmatched
 }
 
 // applyMappings attaches each mapping's source to its target presented channel,

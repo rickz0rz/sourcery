@@ -93,6 +93,51 @@ func TestUnmatchedMappingIsReported(t *testing.T) {
 	}
 }
 
+// A web stream attaches to a channel and ranks below every tuner, so it is
+// only ever a last resort.
+func TestWebStreamAttachesAsLastResort(t *testing.T) {
+	states := []device.State{
+		state("cable", config.SourceCable, ch("5", "WKAR", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("5.1", "WKAR", "MPEG2")),
+	}
+	opts := Options{Streams: []config.Stream{{
+		Channel: "5",
+		URL:     "https://example.test/live.ts",
+		Headers: map[string]string{"Referer": "https://example.test/"},
+	}}}
+
+	l := Merge(states, opts)
+	if len(l.UnmatchedStreams) != 0 {
+		t.Fatalf("stream was not attached: %+v", l.UnmatchedStreams)
+	}
+
+	c := find(t, l, "5")
+	if len(c.Candidates) != 3 {
+		t.Fatalf("channel 5 has %d candidates, want 3 (two tuners + web)", len(c.Candidates))
+	}
+	// The web stream must sort last, behind both tuners.
+	last := c.Candidates[len(c.Candidates)-1]
+	if !last.Web {
+		t.Error("the web stream should rank last, behind every tuner")
+	}
+	if last.Headers["Referer"] != "https://example.test/" {
+		t.Errorf("headers not carried onto the candidate: %+v", last.Headers)
+	}
+	// The tuners still come first.
+	if c.Candidates[0].Web {
+		t.Error("a tuner should be preferred over the web stream")
+	}
+}
+
+func TestUnmatchedWebStreamIsReported(t *testing.T) {
+	states := []device.State{state("cable", config.SourceCable, ch("2", "WJBK", "MPEG2"))}
+	opts := Options{Streams: []config.Stream{{Channel: "999", URL: "https://x.test/s.ts"}}}
+
+	if l := Merge(states, opts); len(l.UnmatchedStreams) != 1 {
+		t.Errorf("reported %d unmatched streams, want 1", len(l.UnmatchedStreams))
+	}
+}
+
 // An exclude rule drops a specific channel by device and number.
 func TestExcludeDropsChannel(t *testing.T) {
 	states := []device.State{

@@ -45,11 +45,12 @@ type Upstream interface {
 	Close() error
 }
 
-// Opener starts an upstream stream. Keeping this an interface lets the hub be
-// tested without real devices, and keeps the reuse logic independent of the
-// transport.
+// Opener starts an upstream stream. headers are applied to the request, for a
+// web stream that requires a particular Referer or User-Agent; it is nil for
+// device streams. Keeping this an interface lets the hub be tested without real
+// devices, and keeps the reuse logic independent of the transport.
 type Opener interface {
-	Open(ctx context.Context, url string) (Upstream, error)
+	Open(ctx context.Context, url string, headers map[string]string) (Upstream, error)
 }
 
 // Hub tracks the live upstreams and their subscribers.
@@ -166,9 +167,15 @@ func (h *Hub) create(ch lineup.Channel, consumer string) (*Subscription, error) 
 			if tried[cand.URL] {
 				continue
 			}
-			lease, ok := h.arbiter.TryAcquire(cand)
-			if !ok {
-				continue
+			// A web stream consumes no tuner, so it skips arbitration entirely
+			// and serves whenever the device candidates ahead of it could not.
+			var lease *arbiter.Lease
+			if !cand.Web {
+				l, ok := h.arbiter.TryAcquire(cand)
+				if !ok {
+					continue
+				}
+				lease = l
 			}
 			b = &broadcast{
 				hub:   h,
@@ -191,7 +198,7 @@ func (h *Hub) create(ch lineup.Channel, consumer string) (*Subscription, error) 
 		// Open with a background context: the upstream outlives the request that
 		// happened to start it, so it must not be cancelled when that consumer
 		// disconnects. Connect and header timeouts still bound it.
-		up, err := h.proxy.Open(context.Background(), b.cand.URL)
+		up, err := h.proxy.Open(context.Background(), b.cand.URL, b.cand.Headers)
 		if err != nil {
 			b.lease.Release()
 			h.mu.Lock()

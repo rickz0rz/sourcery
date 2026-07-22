@@ -53,16 +53,21 @@ type Upstream struct {
 	body io.ReadCloser
 }
 
-// Open starts a stream. The device allocates a tuner at this point and holds it
-// until the response body is closed.
+// Open starts a stream. For a device, it allocates a tuner at this point and
+// holds it until the response body is closed. headers are applied to the
+// request, which is how a web stream that requires a particular Referer or
+// User-Agent is satisfied; it is nil for device streams.
 //
 // A device with no free tuner answers with an error status rather than
 // blocking, which is how the caller learns that its capacity accounting was
 // stale and it should try another candidate.
-func (p *Proxy) Open(ctx context.Context, url string) (*Upstream, error) {
+func (p *Proxy) Open(ctx context.Context, url string, headers map[string]string) (*Upstream, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build stream request for %s: %w", url, err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := p.client.Do(req)

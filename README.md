@@ -86,6 +86,7 @@ Everything else is optional:
 | `grace_period` | `10s` | How long a tuner is held for a returning consumer |
 | `mappings` | none | Manually attach a source to a presented channel |
 | `exclude` | none | Drop specific channels by device and number |
+| `streams` | none | Attach an external web stream as a last resort |
 
 ### Manual mappings and exclusions
 
@@ -110,6 +111,33 @@ mapped source is then preferred or not by the same ranking as any other route,
 and no longer appears as a channel of its own. A mapping that names a channel
 or source that does not exist is logged at startup rather than ignored.
 `exclude` drops a channel from the lineup entirely.
+
+### Web stream fallbacks
+
+A channel can be backed by an external web stream, used only when every physical
+tuner for that channel is busy. Because it consumes no tuner, it can serve when
+nothing else can:
+
+```json
+{
+  "streams": [
+    {
+      "channel": "5.1",
+      "url": "https://example.com/live.ts",
+      "headers": { "Referer": "https://example.com/" }
+    }
+  ]
+}
+```
+
+`headers` are sent with the request, which is how a stream that demands a
+particular `Referer` or `User-Agent` is satisfied. A web stream always ranks
+below every tuner, so it is a genuine last resort — a returning tuner is
+preferred the moment one frees up.
+
+**Limitation:** Sourcery relays the URL's bytes as-is. This works for a direct
+transport stream, but not for an HLS playlist (`.m3u8`), which would hand the
+consumer segment URLs to fetch directly, without the configured headers.
 
 ## The probe report
 

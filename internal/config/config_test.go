@@ -92,6 +92,14 @@ func TestLoadRejects(t *testing.T) {
 		name: "exclude unknown device",
 		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"exclude":[{"device":"ghost","channel":"9"}]}`,
 		want: "not a configured device",
+	}, {
+		name: "stream missing url",
+		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"streams":[{"channel":"5"}]}`,
+		want: "url is required",
+	}, {
+		name: "stream missing channel",
+		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"streams":[{"url":"https://x.test/s.ts"}]}`,
+		want: "channel is required",
 	}}
 
 	for _, tt := range tests {
@@ -165,5 +173,25 @@ func TestMappingsAndExcludeLoad(t *testing.T) {
 	}
 	if len(cfg.Exclude) != 1 || cfg.Exclude[0].Channel != "999" {
 		t.Errorf("exclude = %+v", cfg.Exclude)
+	}
+}
+
+func TestStreamsLoad(t *testing.T) {
+	cfg, err := Load(write(t, `{
+		"devices":[{"name":"cable","address":"192.0.2.11","source":"cable"}],
+		"streams":[{
+			"channel":"5",
+			"url":"https://example.test/live.ts",
+			"headers":{"Referer":"https://example.test/"}
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Streams) != 1 {
+		t.Fatalf("got %d streams, want 1", len(cfg.Streams))
+	}
+	if cfg.Streams[0].Headers["Referer"] != "https://example.test/" {
+		t.Errorf("headers = %+v", cfg.Streams[0].Headers)
 	}
 }

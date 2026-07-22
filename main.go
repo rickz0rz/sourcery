@@ -59,6 +59,7 @@ func run() error {
 		AllowATSC3: cfg.AllowATSC3,
 		Mappings:   cfg.Mappings,
 		Exclude:    cfg.Exclude,
+		Streams:    cfg.Streams,
 	}
 
 	if *probeOnly {
@@ -87,6 +88,10 @@ func run() error {
 	for _, m := range merged.UnmatchedMappings {
 		log.Warn("configured mapping had no effect; check the channel numbers",
 			"channel", m.Channel, "source_device", m.Source.Device, "source_channel", m.Source.Channel)
+	}
+	for _, st := range merged.UnmatchedStreams {
+		log.Warn("configured web stream had no effect; its channel is not in the lineup",
+			"channel", st.Channel, "url", st.URL)
 	}
 	log.Info("lineup merged",
 		"channels", len(merged.Channels),
@@ -244,6 +249,9 @@ func report(states []device.State, opts lineup.Options) {
 	for _, m := range merged.UnmatchedMappings {
 		fmt.Printf("WARNING: mapping for channel %s from %s:%s matched nothing\n",
 			m.Channel, m.Source.Device, m.Source.Channel)
+	}
+	for _, st := range merged.UnmatchedStreams {
+		fmt.Printf("WARNING: web stream for channel %s is not in the lineup\n", st.Channel)
 	}
 
 	for _, c := range merged.Channels {

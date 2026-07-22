@@ -68,8 +68,8 @@ func New(cfg *config.Config, arb *arbiter.Arbiter, log *slog.Logger) (*Server, e
 // relay.Upstream interface rather than the concrete type.
 type proxyOpener struct{ p *stream.Proxy }
 
-func (o proxyOpener) Open(ctx context.Context, url string) (relay.Upstream, error) {
-	up, err := o.p.Open(ctx, url)
+func (o proxyOpener) Open(ctx context.Context, url string, headers map[string]string) (relay.Upstream, error) {
+	up, err := o.p.Open(ctx, url, headers)
 	if err != nil {
 		return nil, err
 	}
