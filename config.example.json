@@ -1,4 +1,5 @@
 {
+  "grace_period": "10s",
   "devices": [
     {
       "name": "antenna",
@@ -10,5 +11,11 @@
       "address": "192.0.2.11",
       "source": "cable"
     }
+  ],
+  "mappings": [
+    { "channel": "294", "source": { "device": "antenna", "channel": "4.2" } }
+  ],
+  "exclude": [
+    { "device": "cable", "channel": "999" }
   ]
 }

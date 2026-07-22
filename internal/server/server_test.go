@@ -342,6 +342,26 @@ func subscribers(s *Server) int {
 	return n
 }
 
+// The status page shows who is watching what, and the grace-held idle streams.
+func TestStatusPageShowsLiveStreams(t *testing.T) {
+	url, release := holdOpen(t)
+	defer release()
+
+	s := testServerWithTuners(t, 2, hdhr.Channel{
+		GuideNumber: "2.1", GuideName: "WJBK", VideoCodec: "MPEG2", URL: url,
+	})
+	streamInBackground(t, s, "/auto/v2.1")
+	waitFor(t, "a live stream", func() bool { return subscribers(s) == 1 })
+
+	body, _ := io.ReadAll(get(t, s, "/").Body)
+	if !strings.Contains(string(body), "live streams:") {
+		t.Errorf("status page has no live streams section:\n%s", body)
+	}
+	if !strings.Contains(string(body), "consumer(s) on 1 tuner") {
+		t.Errorf("status page does not report the shared tuner:\n%s", body)
+	}
+}
+
 // The arbiter's view of foreign usage is always slightly stale, so a device may
 // refuse a tuner it was believed to have. The next candidate must be tried.
 func TestFallsBackWhenUpstreamRefuses(t *testing.T) {

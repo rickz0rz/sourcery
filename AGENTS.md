@@ -27,9 +27,16 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
   lifetime is an arbitration concern, not a client one.
 - **`internal/relay` owns the lease for a shared stream.** One `arbiter.Lease`
   is held per upstream (`broadcast`), not per consumer, and released by the
-  reader's `finish` when the last consumer leaves. Nothing outside the hub
-  should acquire or release a lease on a streaming path. If open fails during
-  `create`, that candidate's lease is released before trying the next.
+  reader's `finish` when the stream tears down. Nothing outside the hub should
+  acquire or release a lease on a streaming path. If open fails during `create`,
+  that candidate's lease is released before trying the next.
+- **The grace period holds a tuner past the last consumer.** When a broadcast
+  empties it does not tear down immediately; a timer (`broadcast.grace`) keeps
+  the upstream open so a returning consumer reattaches without re-tuning. `join`
+  cancels the timer; the reader keeps reading and discarding during the window.
+  Grace `0` restores immediate teardown. All state changes (`draining`,
+  `closed`, the timer) are under `broadcast.mu`; the timer callback re-checks
+  emptiness under the lock, since a `join` can race it.
 - **The reuse key is the upstream URL, not the channel number.** Two presented
   channels that resolve to the same device feed must share one tuner. Keying by
   channel number would open a second tuner to a feed already being received.
@@ -124,7 +131,10 @@ firmware change.
   and `WDIVDT2` keeps its digit, so subchannels are untouched.
 - **Some stations will never match automatically.** One observed antenna feed is
   called `H&I` where cable calls the same programming `WDIVDT2`. That is what
-  manual mapping (M5) is for; do not widen the fuzzy matching to chase them.
+  manual mapping is for (`mappings` in config); do not widen the fuzzy matching
+  to chase them. A mapped source attaches only where the mapping says — it is
+  held out of automatic matching and does not stand alone — and an unmatched
+  mapping is reported (`Lineup.UnmatchedMappings`), never silently dropped.
 - **Both device types report the HD flag**, and on cable it tracked the H264 set
   exactly. Ranking prefers HD above source preference: a viewer notices standard
   definition and does not notice which tuner produced the picture.

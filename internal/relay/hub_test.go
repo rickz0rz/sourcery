@@ -93,6 +93,11 @@ func (p *fakeProxy) upstream(url string) *fakeUpstream {
 
 func testHub(t *testing.T, proxy *fakeProxy, tuners map[string]int) *Hub {
 	t.Helper()
+	return testHubGrace(t, proxy, tuners, 0)
+}
+
+func testHubGrace(t *testing.T, proxy *fakeProxy, tuners map[string]int, grace time.Duration) *Hub {
+	t.Helper()
 	var states []device.State
 	for name, count := range tuners {
 		states = append(states, device.State{
@@ -100,7 +105,7 @@ func testHub(t *testing.T, proxy *fakeProxy, tuners map[string]int) *Hub {
 			Discover: &hdhr.Discover{TunerCount: count},
 		})
 	}
-	return NewHub(arbiter.New(states), proxy, slog.New(slog.DiscardHandler))
+	return NewHub(arbiter.New(states), proxy, slog.New(slog.DiscardHandler), grace)
 }
 
 func channel(name string, cands ...lineup.Candidate) lineup.Channel {
@@ -115,7 +120,7 @@ func TestSingleConsumerOpensOneStream(t *testing.T) {
 	proxy := newFakeProxy()
 	hub := testHub(t, proxy, map[string]int{"antenna": 2})
 
-	sub, err := hub.Subscribe(channel("2.1", cand("antenna", "2.1", "u")))
+	sub, err := hub.Subscribe(channel("2.1", cand("antenna", "2.1", "u")), "test")
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -138,7 +143,7 @@ func TestReuseSharesOneStream(t *testing.T) {
 	subs := make([]*Subscription, 3)
 	for i := range subs {
 		var err error
-		subs[i], err = hub.Subscribe(ch)
+		subs[i], err = hub.Subscribe(ch, "test")
 		if err != nil {
 			t.Fatalf("Subscribe %d: %v", i, err)
 		}
@@ -176,13 +181,13 @@ func TestReuseAcrossChannelsSharingASource(t *testing.T) {
 	hub := testHub(t, proxy, map[string]int{"antenna": 4})
 
 	// Channel 4 and 232 both prefer the same antenna feed.
-	sub1, err := hub.Subscribe(channel("4", cand("antenna", "4.1", "shared"), cand("cable", "4", "c4")))
+	sub1, err := hub.Subscribe(channel("4", cand("antenna", "4.1", "shared"), cand("cable", "4", "c4")), "test")
 	if err != nil {
 		t.Fatalf("Subscribe 4: %v", err)
 	}
 	defer sub1.Close()
 
-	sub2, err := hub.Subscribe(channel("232", cand("antenna", "4.1", "shared"), cand("cable", "232", "c232")))
+	sub2, err := hub.Subscribe(channel("232", cand("antenna", "4.1", "shared"), cand("cable", "232", "c232")), "test")
 	if err != nil {
 		t.Fatalf("Subscribe 232: %v", err)
 	}
@@ -214,7 +219,7 @@ func TestConcurrentRequestsShareOneTuner(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := hub.Subscribe(ch)
+			s, err := hub.Subscribe(ch, "test")
 			subs[i], errs[i] = s, err
 			if err == nil && s.Reused {
 				reused.Add(1)
@@ -246,14 +251,14 @@ func TestDistinctChannelsExhaustTuners(t *testing.T) {
 	proxy := newFakeProxy()
 	hub := testHub(t, proxy, map[string]int{"antenna": 1})
 
-	a, err := hub.Subscribe(channel("2.1", cand("antenna", "2.1", "a")))
+	a, err := hub.Subscribe(channel("2.1", cand("antenna", "2.1", "a")), "test")
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	defer a.Close()
 
 	// A different upstream on the one-tuner device cannot be served.
-	if _, err := hub.Subscribe(channel("5.1", cand("antenna", "5.1", "b"))); !errors.Is(err, ErrNoTuner) {
+	if _, err := hub.Subscribe(channel("5.1", cand("antenna", "5.1", "b")), "test"); !errors.Is(err, ErrNoTuner) {
 		t.Errorf("err = %v, want ErrNoTuner", err)
 	}
 }
@@ -268,7 +273,7 @@ func TestFallsThroughToWorkingCandidate(t *testing.T) {
 	sub, err := hub.Subscribe(channel("2",
 		cand("antenna", "2.1", "broken"),
 		cand("cable", "2", "works"),
-	))
+	), "test")
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -291,8 +296,8 @@ func TestSlowConsumerIsDroppedNotBlocking(t *testing.T) {
 	hub := testHub(t, proxy, map[string]int{"antenna": 2})
 
 	ch := channel("2.1", cand("antenna", "2.1", "u"))
-	slow, _ := hub.Subscribe(ch)
-	fast, _ := hub.Subscribe(ch)
+	slow, _ := hub.Subscribe(ch, "test")
+	fast, _ := hub.Subscribe(ch, "test")
 	defer fast.Close()
 
 	up := proxy.upstream("u")
@@ -350,8 +355,8 @@ func TestTunerReleasedWhenLastConsumerLeaves(t *testing.T) {
 	hub := testHub(t, proxy, map[string]int{"antenna": 1})
 
 	ch := channel("2.1", cand("antenna", "2.1", "u"))
-	a, _ := hub.Subscribe(ch)
-	b, _ := hub.Subscribe(ch)
+	a, _ := hub.Subscribe(ch, "test")
+	b, _ := hub.Subscribe(ch, "test")
 
 	a.Close()
 	if h := held(hub, "antenna"); h != 1 {
@@ -363,7 +368,7 @@ func TestTunerReleasedWhenLastConsumerLeaves(t *testing.T) {
 		"tuner to be released after the last consumer left")
 
 	// And the stream is gone from the registry, so the next request opens fresh.
-	c, err := hub.Subscribe(ch)
+	c, err := hub.Subscribe(ch, "test")
 	if err != nil {
 		t.Fatalf("Subscribe after teardown: %v", err)
 	}
@@ -371,6 +376,47 @@ func TestTunerReleasedWhenLastConsumerLeaves(t *testing.T) {
 	if proxy.openCount("u") != 2 {
 		t.Errorf("opened %d times total, want 2 (a fresh open after teardown)", proxy.openCount("u"))
 	}
+}
+
+// Within the grace period a returning consumer reattaches to the still-open
+// upstream, so no second tuner is taken -- the point of the grace window.
+func TestGracePeriodAllowsReattachWithoutRetuning(t *testing.T) {
+	proxy := newFakeProxy()
+	hub := testHubGrace(t, proxy, map[string]int{"antenna": 1}, time.Minute)
+
+	ch := channel("2.1", cand("antenna", "2.1", "u"))
+	first, _ := hub.Subscribe(ch, "test")
+	first.Close() // last consumer leaves; grace begins
+
+	// The tuner is still held during grace, and a return reuses the stream.
+	if h := held(hub, "antenna"); h != 1 {
+		t.Errorf("held = %d during grace, want the tuner kept", h)
+	}
+	second, err := hub.Subscribe(ch, "test")
+	if err != nil {
+		t.Fatalf("reattach: %v", err)
+	}
+	defer second.Close()
+
+	if !second.Reused {
+		t.Error("the returning consumer should have reused the held stream")
+	}
+	if proxy.openCount("u") != 1 {
+		t.Errorf("opened %d times, want 1 (no re-tune within grace)", proxy.openCount("u"))
+	}
+}
+
+// When the grace period passes with nobody watching, the tuner is released.
+func TestGracePeriodExpiresAndReleasesTuner(t *testing.T) {
+	proxy := newFakeProxy()
+	hub := testHubGrace(t, proxy, map[string]int{"antenna": 1}, 30*time.Millisecond)
+
+	ch := channel("2.1", cand("antenna", "2.1", "u"))
+	sub, _ := hub.Subscribe(ch, "test")
+	sub.Close()
+
+	waitFor(t, func() bool { return held(hub, "antenna") == 0 },
+		"the tuner to be released after the grace period")
 }
 
 func held(hub *Hub, device string) int {

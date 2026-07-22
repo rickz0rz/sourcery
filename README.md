@@ -28,16 +28,16 @@ reasoning and the milestone breakdown.
 
 ## Status
 
-**M3 — Sourcery shares tuners.** Consumers watching the same channel share one
-upstream connection, so three consumers of one channel occupy one tuner instead
-of three.
+**M5 — feature complete.** Sourcery emulates a tuner, merges a lineup, streams,
+shares tuners among consumers, holds them briefly for returning consumers, and
+takes manual channel mappings and exclusions.
 
 - [x] **M0** Config, device registry, one-shot probe
 - [x] **M1** Lineup merge and HDHomeRun emulation endpoints
 - [x] **M2** Passthrough proxy and arbitration
 - [x] **M3** Stream reuse via fan-out
-- [ ] **M4** Grace periods and richer reconciliation
-- [ ] **M5** Manual lineup overrides and operability
+- [x] **M4** Grace periods, so a returning consumer reattaches without re-tuning
+- [x] **M5** Manual mappings and exclusions, and a status view
 
 ## Getting started
 
@@ -83,6 +83,33 @@ Everything else is optional:
 | `device_id` | derived | Pin the advertised identity (eight hex digits) |
 | `advertise_address` | request host | Override the host used in stream URLs |
 | `allow_atsc3` | `false` | Admit ATSC 3.0 channels |
+| `grace_period` | `10s` | How long a tuner is held for a returning consumer |
+| `mappings` | none | Manually attach a source to a presented channel |
+| `exclude` | none | Drop specific channels by device and number |
+
+### Manual mappings and exclusions
+
+Automatic matching connects the same station across sources by callsign, but
+some stations are named too differently to match — an antenna feed called `H&I`
+that a cable provider lists as `WDIVDT2`. A mapping attaches the antenna source
+to the presented cable channel by hand:
+
+```json
+{
+  "mappings": [
+    { "channel": "294", "source": { "device": "antenna", "channel": "4.2" } }
+  ],
+  "exclude": [
+    { "device": "cable", "channel": "999" }
+  ]
+}
+```
+
+`channel` is the presented (spine) channel number the source is attached to; the
+mapped source is then preferred or not by the same ranking as any other route,
+and no longer appears as a channel of its own. A mapping that names a channel
+or source that does not exist is logged at startup rather than ignored.
+`exclude` drops a channel from the lineup entirely.
 
 ## The probe report
 
@@ -198,8 +225,15 @@ source would.
 
 One reader pulls from each upstream and fans its bytes out to every consumer. A
 consumer that cannot keep up with the real-time stream is dropped rather than
-allowed to stall the reader or the others; its player can reconnect. When the
-last consumer of a stream leaves, the upstream is closed and its tuner released.
+allowed to stall the reader or the others; its player can reconnect.
+
+When the last consumer of a stream leaves, the upstream is not closed at once.
+It is held for a grace period (`grace_period`, ten seconds by default) so a
+consumer that flips away and back — or a DVR that opens, samples, and closes a
+stream while scanning — reattaches to the same tuner instead of re-tuning, and
+never risks a 503 from something else claiming the tuner in the gap. Only when
+the grace passes with nobody watching is the upstream closed and the tuner
+released.
 
 ## Cross-compiling for a Raspberry Pi
 

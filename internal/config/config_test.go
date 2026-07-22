@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func write(t *testing.T, body string) string {
@@ -71,6 +72,26 @@ func TestLoadRejects(t *testing.T) {
 		name: "malformed json",
 		body: `{"devices":`,
 		want: "parse",
+	}, {
+		name: "bad grace period",
+		body: `{"grace_period":"soon","devices":[{"name":"a","address":"192.0.2.1","source":"cable"}]}`,
+		want: "duration",
+	}, {
+		name: "negative grace period",
+		body: `{"grace_period":"-5s","devices":[{"name":"a","address":"192.0.2.1","source":"cable"}]}`,
+		want: "negative",
+	}, {
+		name: "mapping to unknown device",
+		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"mappings":[{"channel":"2","source":{"device":"ghost","channel":"2.1"}}]}`,
+		want: "not a configured device",
+	}, {
+		name: "mapping missing channel",
+		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"mappings":[{"source":{"device":"a","channel":"2.1"}}]}`,
+		want: "channel is required",
+	}, {
+		name: "exclude unknown device",
+		body: `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}],"exclude":[{"device":"ghost","channel":"9"}]}`,
+		want: "not a configured device",
 	}}
 
 	for _, tt := range tests {
@@ -95,5 +116,54 @@ func TestLoadMissingFile(t *testing.T) {
 func TestAntennaOutranksCable(t *testing.T) {
 	if SourceAntenna.Rank() >= SourceCable.Rank() {
 		t.Error("antenna should outrank cable to conserve scarcer cable tuners")
+	}
+}
+
+func TestGracePeriodDefaultsAndOverrides(t *testing.T) {
+	base := `{"devices":[{"name":"a","address":"192.0.2.1","source":"cable"}]`
+
+	unset, err := Load(write(t, base+"}"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if unset.Grace() != DefaultGracePeriod {
+		t.Errorf("unset grace = %v, want the default %v", unset.Grace(), DefaultGracePeriod)
+	}
+
+	// An explicit "0s" is honoured, meaning immediate teardown.
+	zero, err := Load(write(t, base+`,"grace_period":"0s"}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if zero.Grace() != 0 {
+		t.Errorf("explicit 0s grace = %v, want 0", zero.Grace())
+	}
+
+	set, err := Load(write(t, base+`,"grace_period":"45s"}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if set.Grace() != 45*time.Second {
+		t.Errorf("grace = %v, want 45s", set.Grace())
+	}
+}
+
+func TestMappingsAndExcludeLoad(t *testing.T) {
+	cfg, err := Load(write(t, `{
+		"devices":[
+			{"name":"antenna","address":"192.0.2.10","source":"antenna"},
+			{"name":"cable","address":"192.0.2.11","source":"cable"}
+		],
+		"mappings":[{"channel":"294","source":{"device":"antenna","channel":"4.2"}}],
+		"exclude":[{"device":"cable","channel":"999"}]
+	}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Mappings) != 1 || cfg.Mappings[0].Channel != "294" {
+		t.Errorf("mappings = %+v", cfg.Mappings)
+	}
+	if len(cfg.Exclude) != 1 || cfg.Exclude[0].Channel != "999" {
+		t.Errorf("exclude = %+v", cfg.Exclude)
 	}
 }

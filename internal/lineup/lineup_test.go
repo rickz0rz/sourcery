@@ -20,6 +20,100 @@ func ch(number, name, video string) hdhr.Channel {
 	return hdhr.Channel{GuideNumber: number, GuideName: name, VideoCodec: video, AudioCodec: "AC3"}
 }
 
+// A manual mapping connects stations that automatic matching cannot -- an
+// antenna feed named "H&I" that cable lists as "WDIVDT2".
+func TestManualMappingAttachesSource(t *testing.T) {
+	states := []device.State{
+		state("cable", config.SourceCable, ch("294", "WDIVDT2", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("4.2", "H&I", "MPEG2")),
+	}
+	opts := Options{Mappings: []config.Mapping{
+		{Channel: "294", Source: config.ChannelRef{Device: "antenna", Channel: "4.2"}},
+	}}
+
+	l := Merge(states, opts)
+
+	if len(l.UnmatchedMappings) != 0 {
+		t.Fatalf("mapping was not applied: %+v", l.UnmatchedMappings)
+	}
+	// The antenna feed is now a route for the cable channel, and no longer a
+	// standalone channel of its own.
+	c := find(t, l, "294")
+	if len(c.Candidates) != 2 {
+		t.Fatalf("channel 294 has %d candidates, want the antenna attached", len(c.Candidates))
+	}
+	if c.Candidates[0].Device != "antenna" {
+		t.Errorf("routes to %q first, want the antenna", c.Candidates[0].Device)
+	}
+	for _, ch := range l.Channels {
+		if ch.Number == "4.2" {
+			t.Error("the mapped antenna feed should not also stand alone as 4.2")
+		}
+	}
+}
+
+// A mapping preferred wins over automatic name matching for the same source.
+func TestMappingOverridesAutoMatch(t *testing.T) {
+	states := []device.State{
+		state("cable", config.SourceCable,
+			ch("2", "WJBK", "MPEG2"),
+			ch("294", "WDIVDT2", "MPEG2"),
+		),
+		// Antenna WJBK would auto-match cable 2, but the mapping sends it to 294.
+		state("antenna", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
+	}
+	opts := Options{Mappings: []config.Mapping{
+		{Channel: "294", Source: config.ChannelRef{Device: "antenna", Channel: "2.1"}},
+	}}
+
+	l := Merge(states, opts)
+
+	if c := find(t, l, "294"); len(c.Candidates) != 2 {
+		t.Errorf("mapping target has %d candidates, want 2", len(c.Candidates))
+	}
+	if c := find(t, l, "2"); len(c.Candidates) != 1 {
+		t.Errorf("cable 2 has %d candidates, want the antenna diverted by the mapping", len(c.Candidates))
+	}
+}
+
+// A mapping that names a missing channel or source is reported, not swallowed.
+func TestUnmatchedMappingIsReported(t *testing.T) {
+	states := []device.State{
+		state("cable", config.SourceCable, ch("2", "WJBK", "MPEG2")),
+		state("antenna", config.SourceAntenna, ch("2.1", "WJBK", "MPEG2")),
+	}
+	opts := Options{Mappings: []config.Mapping{
+		{Channel: "999", Source: config.ChannelRef{Device: "antenna", Channel: "2.1"}}, // no channel 999
+		{Channel: "2", Source: config.ChannelRef{Device: "antenna", Channel: "9.9"}},   // no source 9.9
+	}}
+
+	l := Merge(states, opts)
+	if len(l.UnmatchedMappings) != 2 {
+		t.Errorf("reported %d unmatched mappings, want 2", len(l.UnmatchedMappings))
+	}
+}
+
+// An exclude rule drops a specific channel by device and number.
+func TestExcludeDropsChannel(t *testing.T) {
+	states := []device.State{
+		state("cable", config.SourceCable,
+			ch("2", "WJBK", "MPEG2"),
+			ch("999", "INFO", "MPEG2"),
+		),
+	}
+	opts := Options{Exclude: []config.ChannelRef{{Device: "cable", Channel: "999"}}}
+
+	l := Merge(states, opts)
+	if l.Excluded.Manual != 1 {
+		t.Errorf("Excluded.Manual = %d, want 1", l.Excluded.Manual)
+	}
+	for _, c := range l.Channels {
+		if c.Number == "999" {
+			t.Error("excluded channel 999 is still present")
+		}
+	}
+}
+
 // find returns the merged channel presented at the given number.
 func find(t *testing.T, l Lineup, number string) Channel {
 	t.Helper()

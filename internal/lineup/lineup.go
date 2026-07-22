@@ -52,6 +52,10 @@ type Lineup struct {
 
 	// Excluded counts what was dropped and why.
 	Excluded Exclusions
+
+	// UnmatchedMappings are configured mappings whose target channel or source
+	// could not be found, so the operator can be told they had no effect.
+	UnmatchedMappings []config.Mapping
 }
 
 // Exclusions breaks down the channels left out of the merged lineup.
@@ -59,10 +63,11 @@ type Exclusions struct {
 	ATSC3  int // next-generation broadcast, off by default
 	DRM    int // copy-protected, so unplayable by the consumers
 	Mobile int // ATSC 3.0 streams tailored to handheld devices
+	Manual int // dropped by a configured exclude rule
 }
 
 // Total returns the number of excluded channels.
-func (e Exclusions) Total() int { return e.ATSC3 + e.DRM + e.Mobile }
+func (e Exclusions) Total() int { return e.ATSC3 + e.DRM + e.Mobile + e.Manual }
 
 // Options tunes what the merged lineup contains.
 type Options struct {
@@ -70,7 +75,17 @@ type Options struct {
 	// default: their AC4 audio does not play reliably on the consumers, and a
 	// channel that cannot be played is worse than one that is simply absent.
 	AllowATSC3 bool
+
+	// Mappings manually attach sources to presented channels that automatic
+	// matching does not connect.
+	Mappings []config.Mapping
+
+	// Exclude drops specific channels by device and guide number.
+	Exclude []config.ChannelRef
 }
+
+// refKey identifies a channel on a device for exclusion and mapping lookups.
+func refKey(device, number string) string { return device + "\x00" + number }
 
 // isATSC3 reports whether a channel is a next-generation broadcast.
 //
@@ -225,8 +240,20 @@ func trimDigitalSuffix(s string) string {
 //     Redundant while ATSC 3.0 is excluded wholesale, but it keeps them out if
 //     next-generation channels are ever admitted.
 func Merge(states []device.State, opts Options) Lineup {
+	excludeSet := make(map[string]bool, len(opts.Exclude))
+	for _, e := range opts.Exclude {
+		excludeSet[refKey(e.Device, e.Channel)] = true
+	}
+	// Sources named by a mapping are attached by hand later, so they are held
+	// back from automatic matching and from standing alone.
+	mappedSources := make(map[string]bool, len(opts.Mappings))
+	for _, m := range opts.Mappings {
+		mappedSources[refKey(m.Source.Device, m.Source.Channel)] = true
+	}
+
 	var excluded Exclusions
 	usable := make(map[*device.Device][]hdhr.Channel)
+	byRef := make(map[string]Candidate) // every usable candidate, for mapping lookups
 	var devices []*device.Device
 
 	for _, s := range states {
@@ -236,6 +263,8 @@ func Merge(states []device.State, opts Options) Lineup {
 		devices = append(devices, s.Device)
 		for _, ch := range s.Lineup {
 			switch {
+			case excludeSet[refKey(s.Device.Name, ch.GuideNumber)]:
+				excluded.Manual++
 			case !opts.AllowATSC3 && isATSC3(ch):
 				excluded.ATSC3++
 			case ch.Protected():
@@ -244,6 +273,7 @@ func Merge(states []device.State, opts Options) Lineup {
 				excluded.Mobile++
 			default:
 				usable[s.Device] = append(usable[s.Device], ch)
+				byRef[refKey(s.Device.Name, ch.GuideNumber)] = candidateOf(s.Device, ch)
 			}
 		}
 	}
@@ -251,13 +281,17 @@ func Merge(states []device.State, opts Options) Lineup {
 	spine := spineSource(devices)
 
 	// Index the alternate devices' channels by station, so each spine channel
-	// can pick up every feed of the same station.
+	// can pick up every feed of the same station. Manually mapped sources are
+	// held back; they attach only where the mapping says.
 	alternates := make(map[string][]Candidate)
 	for _, d := range devices {
 		if d.Source == spine {
 			continue
 		}
 		for _, ch := range usable[d] {
+			if mappedSources[refKey(d.Name, ch.GuideNumber)] {
+				continue
+			}
 			if key := normalizeName(ch.GuideName); key != "" {
 				alternates[key] = append(alternates[key], candidateOf(d, ch))
 			}
@@ -295,12 +329,15 @@ func Merge(states []device.State, opts Options) Lineup {
 	// Alternate channels with no counterpart on the spine still belong in the
 	// lineup; they are simply not available from the comprehensive source. Each
 	// entry stands alone, so the antenna's seven distinct WDWO-CD subchannels
-	// stay seven channels.
+	// stay seven channels. Mapped sources are excluded here too.
 	for _, d := range devices {
 		if d.Source == spine {
 			continue
 		}
 		for _, ch := range usable[d] {
+			if mappedSources[refKey(d.Name, ch.GuideNumber)] {
+				continue
+			}
 			if key := normalizeName(ch.GuideName); key == "" || attached[key] {
 				continue
 			}
@@ -314,6 +351,8 @@ func Merge(states []device.State, opts Options) Lineup {
 		}
 	}
 
+	unmatched := applyMappings(channels, opts.Mappings, byRef)
+
 	slices.SortStableFunc(channels, func(a, b Channel) int {
 		if n := compareChannelNumbers(a.Number, b.Number); n != 0 {
 			return n
@@ -321,7 +360,36 @@ func Merge(states []device.State, opts Options) Lineup {
 		return cmp.Compare(a.Name, b.Name)
 	})
 
-	return Lineup{Channels: channels, Excluded: excluded}
+	return Lineup{Channels: channels, Excluded: excluded, UnmatchedMappings: unmatched}
+}
+
+// applyMappings attaches each mapping's source to its target presented channel,
+// re-ranking the target so the manual route competes on the same terms as the
+// automatic ones. A mapping whose target channel or source is not present is
+// returned as unmatched rather than being silently ignored.
+func applyMappings(channels []Channel, mappings []config.Mapping, byRef map[string]Candidate) []config.Mapping {
+	if len(mappings) == 0 {
+		return nil
+	}
+
+	byNumber := make(map[string]*Channel, len(channels))
+	for i := range channels {
+		byNumber[channels[i].Number] = &channels[i]
+	}
+
+	var unmatched []config.Mapping
+	for _, m := range mappings {
+		target, haveTarget := byNumber[m.Channel]
+		source, haveSource := byRef[refKey(m.Source.Device, m.Source.Channel)]
+		if !haveTarget || !haveSource {
+			unmatched = append(unmatched, m)
+			continue
+		}
+		target.Candidates = append(target.Candidates, source)
+		slices.SortStableFunc(target.Candidates, rankCandidate)
+		target.HD = anyHD(target.Candidates)
+	}
+	return unmatched
 }
 
 // spineSource picks the source that supplies the lineup's identity.

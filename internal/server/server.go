@@ -60,7 +60,7 @@ func New(cfg *config.Config, arb *arbiter.Arbiter, log *slog.Logger) (*Server, e
 		deviceID: hdhr.FormatDeviceID(id),
 		log:      log,
 		arbiter:  arb,
-		hub:      relay.NewHub(arb, proxyOpener{stream.NewProxy()}, log),
+		hub:      relay.NewHub(arb, proxyOpener{stream.NewProxy()}, log, cfg.Grace()),
 	}, nil
 }
 
@@ -199,7 +199,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sub, err := s.hub.Subscribe(ch)
+	sub, err := s.hub.Subscribe(ch, consumer)
 	if err != nil {
 		// Never tear down a stream in flight to make room for a new one.
 		// Refusing is honest, and the log line is what makes contention visible.
@@ -275,8 +275,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if live := s.hub.Snapshot(); len(live) > 0 {
 		fmt.Fprintln(w, "\nlive streams:")
 		for _, st := range live {
-			fmt.Fprintf(w, "  %s ch %s  %d consumer(s) on 1 tuner\n",
-				st.Candidate.Device, st.Candidate.GuideNumber, st.Subscribers)
+			if st.Idle {
+				fmt.Fprintf(w, "  %s ch %s  idle, held for reuse\n",
+					st.Candidate.Device, st.Candidate.GuideNumber)
+				continue
+			}
+			fmt.Fprintf(w, "  %s ch %s  %d consumer(s) on 1 tuner: %s\n",
+				st.Candidate.Device, st.Candidate.GuideNumber, st.Subscribers,
+				strings.Join(st.Consumers, ", "))
 		}
 	}
 }

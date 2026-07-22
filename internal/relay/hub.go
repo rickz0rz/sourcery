@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"sourcery/internal/arbiter"
 	"sourcery/internal/lineup"
@@ -56,17 +57,20 @@ type Hub struct {
 	arbiter *arbiter.Arbiter
 	proxy   Opener
 	log     *slog.Logger
+	grace   time.Duration
 
 	mu      sync.Mutex
 	streams map[string]*broadcast // keyed by upstream URL
 }
 
-// NewHub builds a Hub.
-func NewHub(arb *arbiter.Arbiter, proxy Opener, log *slog.Logger) *Hub {
+// NewHub builds a Hub. grace is how long an upstream is kept open after its
+// last consumer leaves, so a returning consumer reattaches without re-tuning.
+func NewHub(arb *arbiter.Arbiter, proxy Opener, log *slog.Logger, grace time.Duration) *Hub {
 	return &Hub{
 		arbiter: arb,
 		proxy:   proxy,
 		log:     log,
+		grace:   grace,
 		streams: make(map[string]*broadcast),
 	}
 }
@@ -93,30 +97,31 @@ func (s *Subscription) Chunks() <-chan []byte { return s.sub.ch }
 func (s *Subscription) Close() { s.b.remove(s.sub) }
 
 type subscriber struct {
-	ch chan []byte
+	ch       chan []byte
+	consumer string // an identifier for the consumer, for the status view
 }
 
 // Subscribe attaches a consumer to the given channel, reusing a live upstream
 // when one already serves any of the channel's candidate sources, and opening
-// a new one otherwise.
+// a new one otherwise. consumer is an identifier used only for the status view.
 //
 // Reuse is preferred over source preference: joining an existing stream costs
 // no tuner at all, which conserves capacity better than picking the nominally
 // preferred source would.
-func (h *Hub) Subscribe(ch lineup.Channel) (*Subscription, error) {
+func (h *Hub) Subscribe(ch lineup.Channel, consumer string) (*Subscription, error) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if b := h.existing(ch); b != nil {
 			<-b.ready
 			if b.err != nil {
 				continue // that start failed and removed itself; try again
 			}
-			if sub := b.join(); sub != nil {
+			if sub := b.join(consumer); sub != nil {
 				return &Subscription{Candidate: b.cand, Reused: true, sub: sub, b: b}, nil
 			}
 			continue // it was torn down between ready and join; try again
 		}
 
-		sub, err := h.create(ch)
+		sub, err := h.create(ch, consumer)
 		if errors.Is(err, errCollision) {
 			continue // someone else is starting the same upstream; join it
 		}
@@ -140,7 +145,7 @@ func (h *Hub) existing(ch lineup.Channel) *broadcast {
 // create opens a new upstream for the first candidate that has a free tuner and
 // answers. Candidates whose open fails are skipped, since the arbiter's view of
 // foreign usage is always slightly stale and the device is the final authority.
-func (h *Hub) create(ch lineup.Channel) (*Subscription, error) {
+func (h *Hub) create(ch lineup.Channel, consumer string) (*Subscription, error) {
 	tried := make(map[string]bool)
 
 	for {
@@ -170,6 +175,7 @@ func (h *Hub) create(ch lineup.Channel) (*Subscription, error) {
 				key:   cand.URL,
 				cand:  cand,
 				lease: lease,
+				grace: h.grace,
 				ready: make(chan struct{}),
 				subs:  make(map[*subscriber]struct{}),
 			}
@@ -203,7 +209,7 @@ func (h *Hub) create(ch lineup.Channel) (*Subscription, error) {
 		}
 
 		b.up = up
-		sub := &subscriber{ch: make(chan []byte, subscriberBuffer)}
+		sub := &subscriber{ch: make(chan []byte, subscriberBuffer), consumer: consumer}
 		b.subs[sub] = struct{}{}
 		close(b.ready)
 		go b.run()
@@ -212,10 +218,12 @@ func (h *Hub) create(ch lineup.Channel) (*Subscription, error) {
 	}
 }
 
-// Snapshot reports the live streams and how many consumers each has.
+// Snapshot reports one live stream and who is watching it.
 type Snapshot struct {
 	Candidate   lineup.Candidate
+	Consumers   []string // consumer identifiers, one per subscriber
 	Subscribers int
+	Idle        bool // no subscribers; held open within the grace period
 }
 
 // Snapshot returns a view of the current broadcasts.
@@ -226,9 +234,17 @@ func (h *Hub) Snapshot() []Snapshot {
 	out := make([]Snapshot, 0, len(h.streams))
 	for _, b := range h.streams {
 		b.mu.Lock()
-		n := len(b.subs)
+		consumers := make([]string, 0, len(b.subs))
+		for sub := range b.subs {
+			consumers = append(consumers, sub.consumer)
+		}
+		out = append(out, Snapshot{
+			Candidate:   b.cand,
+			Consumers:   consumers,
+			Subscribers: len(b.subs),
+			Idle:        len(b.subs) == 0 && !b.closed,
+		})
 		b.mu.Unlock()
-		out = append(out, Snapshot{Candidate: b.cand, Subscribers: n})
 	}
 	return out
 }

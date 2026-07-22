@@ -55,7 +55,11 @@ func run() error {
 	defer cancelProbe()
 	states := registry.Probe(probeCtx)
 
-	opts := lineup.Options{AllowATSC3: cfg.AllowATSC3}
+	opts := lineup.Options{
+		AllowATSC3: cfg.AllowATSC3,
+		Mappings:   cfg.Mappings,
+		Exclude:    cfg.Exclude,
+	}
 
 	if *probeOnly {
 		report(states, opts)
@@ -80,12 +84,18 @@ func run() error {
 				"device", s.Device.Name, "address", s.Device.Address, "error", s.Err)
 		}
 	}
+	for _, m := range merged.UnmatchedMappings {
+		log.Warn("configured mapping had no effect; check the channel numbers",
+			"channel", m.Channel, "source_device", m.Source.Device, "source_channel", m.Source.Channel)
+	}
 	log.Info("lineup merged",
 		"channels", len(merged.Channels),
 		"multi_source", countMultiSource(merged),
 		"atsc3_excluded", merged.Excluded.ATSC3,
 		"drm_excluded", merged.Excluded.DRM,
-		"mobile_excluded", merged.Excluded.Mobile)
+		"mobile_excluded", merged.Excluded.Mobile,
+		"manually_excluded", merged.Excluded.Manual,
+		"grace_period", cfg.Grace())
 
 	return serve(cfg, srv, registry, arb, log)
 }
@@ -229,8 +239,12 @@ func report(states []device.State, opts lineup.Options) {
 	merged := lineup.Merge(states, opts)
 	fmt.Printf("\nmerged lineup: %d channels, %d available from more than one source\n",
 		len(merged.Channels), countMultiSource(merged))
-	fmt.Printf("excluded: %d ATSC 3.0, %d copy-protected, %d mobile feeds\n",
-		merged.Excluded.ATSC3, merged.Excluded.DRM, merged.Excluded.Mobile)
+	fmt.Printf("excluded: %d ATSC 3.0, %d copy-protected, %d mobile feeds, %d by rule\n",
+		merged.Excluded.ATSC3, merged.Excluded.DRM, merged.Excluded.Mobile, merged.Excluded.Manual)
+	for _, m := range merged.UnmatchedMappings {
+		fmt.Printf("WARNING: mapping for channel %s from %s:%s matched nothing\n",
+			m.Channel, m.Source.Device, m.Source.Channel)
+	}
 
 	for _, c := range merged.Channels {
 		if len(c.Candidates) < 2 {
