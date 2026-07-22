@@ -60,16 +60,31 @@ func New(cfg *config.Config, arb *arbiter.Arbiter, log *slog.Logger) (*Server, e
 		deviceID: hdhr.FormatDeviceID(id),
 		log:      log,
 		arbiter:  arb,
-		hub:      relay.NewHub(arb, proxyOpener{stream.NewProxy()}, log, cfg.Grace()),
+		hub: relay.NewHub(arb, streamOpener{
+			http: stream.NewProxy(),
+			ff:   stream.NewFFmpeg(cfg.FFmpegPath),
+		}, log, cfg.Grace()),
 	}, nil
 }
 
-// proxyOpener adapts a *stream.Proxy to relay.Opener, whose Open returns the
-// relay.Upstream interface rather than the concrete type.
-type proxyOpener struct{ p *stream.Proxy }
+// streamOpener adapts the stream transports to relay.Opener, choosing a direct
+// byte relay or an ffmpeg remux per source, and returning the relay.Upstream
+// interface rather than the concrete type.
+type streamOpener struct {
+	http *stream.Proxy
+	ff   *stream.FFmpeg
+}
 
-func (o proxyOpener) Open(ctx context.Context, url string, headers map[string]string) (relay.Upstream, error) {
-	up, err := o.p.Open(ctx, url, headers)
+func (o streamOpener) Open(ctx context.Context, src relay.Source) (relay.Upstream, error) {
+	var (
+		up  *stream.Upstream
+		err error
+	)
+	if src.Remux {
+		up, err = o.ff.Open(ctx, src.URL, src.Headers)
+	} else {
+		up, err = o.http.Open(ctx, src.URL, src.Headers)
+	}
 	if err != nil {
 		return nil, err
 	}

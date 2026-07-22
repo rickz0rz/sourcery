@@ -53,6 +53,7 @@ type fakeProxy struct {
 	streams  map[string]*fakeUpstream
 	opens    map[string]int
 	headers  map[string]map[string]string // headers seen per URL
+	remux    map[string]bool              // remux flag seen per URL
 	failURLs map[string]bool
 	openCh   chan struct{} // if non-nil, Open blocks until it is signalled
 }
@@ -62,23 +63,25 @@ func newFakeProxy() *fakeProxy {
 		streams:  make(map[string]*fakeUpstream),
 		opens:    make(map[string]int),
 		headers:  make(map[string]map[string]string),
+		remux:    make(map[string]bool),
 		failURLs: make(map[string]bool),
 	}
 }
 
-func (p *fakeProxy) Open(ctx context.Context, url string, headers map[string]string) (Upstream, error) {
+func (p *fakeProxy) Open(ctx context.Context, src Source) (Upstream, error) {
 	if p.openCh != nil {
 		<-p.openCh
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.opens[url]++
-	p.headers[url] = headers
-	if p.failURLs[url] {
+	p.opens[src.URL]++
+	p.headers[src.URL] = src.Headers
+	p.remux[src.URL] = src.Remux
+	if p.failURLs[src.URL] {
 		return nil, errors.New("device refused")
 	}
 	f := newFakeUpstream()
-	p.streams[url] = f
+	p.streams[src.URL] = f
 	return f, nil
 }
 
@@ -121,6 +124,10 @@ func cand(device, number, url string) lineup.Candidate {
 
 func webCand(url string, headers map[string]string) lineup.Candidate {
 	return lineup.Candidate{Device: "web", URL: url, Web: true, Headers: headers}
+}
+
+func remuxCand(url string) lineup.Candidate {
+	return lineup.Candidate{Device: "web", URL: url, Web: true, Remux: true}
 }
 
 func TestSingleConsumerOpensOneStream(t *testing.T) {
@@ -464,6 +471,23 @@ func TestWebStreamIsLastResortAndCarriesHeaders(t *testing.T) {
 	}
 	if got := proxy.headers["https://example.test/live.ts"]["Referer"]; got != "https://example.test/" {
 		t.Errorf("Referer sent = %q, want the configured value", got)
+	}
+}
+
+// A remux candidate is opened with the remux flag set, so the opener knows to
+// route it through ffmpeg rather than a direct byte relay.
+func TestRemuxFlagReachesOpener(t *testing.T) {
+	proxy := newFakeProxy()
+	hub := testHub(t, proxy, map[string]int{"antenna": 1})
+
+	sub, err := hub.Subscribe(channel("5.1", remuxCand("https://x.test/live.m3u8")), "test")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	if !proxy.remux["https://x.test/live.m3u8"] {
+		t.Error("the opener was not told to remux the HLS stream")
 	}
 }
 

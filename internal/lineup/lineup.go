@@ -30,6 +30,9 @@ type Candidate struct {
 	// Headers are extra request headers for a web stream, e.g. a required
 	// Referer. Empty for device candidates.
 	Headers map[string]string
+	// Remux marks a web stream that must be remuxed through ffmpeg (HLS) rather
+	// than relayed byte for byte.
+	Remux bool
 }
 
 // Channel is a logical channel: an identity as consumers see it, plus every
@@ -422,6 +425,7 @@ func applyStreams(channels []Channel, streams []config.Stream) []config.Stream {
 			URL:     s.URL,
 			Headers: s.Headers,
 			Web:     true,
+			Remux:   s.RemuxEnabled(),
 		})
 		slices.SortStableFunc(target.Candidates, rankCandidate)
 	}

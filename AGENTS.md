@@ -17,7 +17,10 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
 
 - **Standard library only.** The binary ships to a Pi and should stay a single
   static file with no module dependencies. This is why config is JSON rather
-  than YAML. Do not add a dependency without raising it first.
+  than YAML. Do not add a dependency without raising it first. The one runtime
+  dependency is `ffmpeg`, shelled out to for HLS remuxing only; it is optional
+  (devices and direct streams never need it) and its absence is a startup
+  warning, not a hard failure.
 - **Layout.** `main.go` at the root stays thin; real work lives in
   `internal/{config,device,hdhr}`.
 - **`internal/hdhr` is control-plane only.** It speaks to the devices' JSON
@@ -41,9 +44,16 @@ GOOS=linux GOARCH=arm64 go build -o sourcery .   # Pi target
   `arbiter.TryAcquire` in `create` and its `broadcast.lease` is nil (which
   `Lease.Release` guards). It ranks below every tuner in `rankCandidate`, so it
   serves only when the tuners are exhausted, and it carries `Headers` through
-  `Opener.Open` for streams that require a specific Referer or User-Agent.
-  Sourcery relays bytes as-is, so this only handles direct transport streams,
-  not HLS playlists.
+  the `relay.Source` for streams that require a specific Referer or User-Agent.
+- **HLS web streams remux through ffmpeg; direct streams relay bytes.** The
+  `relay.Source.Remux` flag (resolved from `Stream.RemuxEnabled`, auto-detecting
+  `.m3u8`) selects `stream.FFmpeg` over `stream.Proxy` in the server's
+  `streamOpener`. `FFmpeg.Open` spawns `ffmpeg -c copy -f mpegts` and returns
+  its stdout as the upstream; `Close` kills the process, which unblocks the
+  reader — the same contract a device connection has. Headers must precede `-i`
+  so ffmpeg applies them to the HLS segment requests too, which is the whole
+  point. `ffmpeg` reaping happens exactly once, guarded, since both `Read` (on
+  EOF, to surface stderr) and `Close` may call `Wait`.
 - **The reuse key is the upstream URL, not the channel number.** Two presented
   channels that resolve to the same device feed must share one tuner. Keying by
   channel number would open a second tuner to a feed already being received.

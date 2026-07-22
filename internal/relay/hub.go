@@ -45,12 +45,20 @@ type Upstream interface {
 	Close() error
 }
 
-// Opener starts an upstream stream. headers are applied to the request, for a
-// web stream that requires a particular Referer or User-Agent; it is nil for
-// device streams. Keeping this an interface lets the hub be tested without real
-// devices, and keeps the reuse logic independent of the transport.
+// Source describes what to open. Headers apply to the request (a web stream's
+// required Referer, say) and Remux selects ffmpeg remuxing (HLS) over a direct
+// byte relay; both are zero for device streams.
+type Source struct {
+	URL     string
+	Headers map[string]string
+	Remux   bool
+}
+
+// Opener starts an upstream stream. Keeping this an interface lets the hub be
+// tested without real devices, and keeps the reuse logic independent of the
+// transport.
 type Opener interface {
-	Open(ctx context.Context, url string, headers map[string]string) (Upstream, error)
+	Open(ctx context.Context, src Source) (Upstream, error)
 }
 
 // Hub tracks the live upstreams and their subscribers.
@@ -198,7 +206,11 @@ func (h *Hub) create(ch lineup.Channel, consumer string) (*Subscription, error) 
 		// Open with a background context: the upstream outlives the request that
 		// happened to start it, so it must not be cancelled when that consumer
 		// disconnects. Connect and header timeouts still bound it.
-		up, err := h.proxy.Open(context.Background(), b.cand.URL, b.cand.Headers)
+		up, err := h.proxy.Open(context.Background(), Source{
+			URL:     b.cand.URL,
+			Headers: b.cand.Headers,
+			Remux:   b.cand.Remux,
+		})
 		if err != nil {
 			b.lease.Release()
 			h.mu.Lock()

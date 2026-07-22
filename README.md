@@ -9,7 +9,8 @@ protocol. It gives them a single unified lineup, prefers whichever source is
 cheapest and best for each channel, and refuses cleanly when nothing is free.
 
 Written in Go with no dependencies outside the standard library, small enough
-to run on a Raspberry Pi.
+to run on a Raspberry Pi. (One optional feature — remuxing HLS web streams —
+shells out to `ffmpeg`; nothing else needs it.)
 
 ## Why
 
@@ -87,6 +88,7 @@ Everything else is optional:
 | `mappings` | none | Manually attach a source to a presented channel |
 | `exclude` | none | Drop specific channels by device and number |
 | `streams` | none | Attach an external web stream as a last resort |
+| `ffmpeg_path` | `ffmpeg` | Path to the ffmpeg binary used to remux HLS |
 
 ### Manual mappings and exclusions
 
@@ -135,9 +137,16 @@ particular `Referer` or `User-Agent` is satisfied. A web stream always ranks
 below every tuner, so it is a genuine last resort — a returning tuner is
 preferred the moment one frees up.
 
-**Limitation:** Sourcery relays the URL's bytes as-is. This works for a direct
-transport stream, but not for an HLS playlist (`.m3u8`), which would hand the
-consumer segment URLs to fetch directly, without the configured headers.
+A **direct transport stream** is relayed byte for byte. An **HLS playlist**
+(`.m3u8`) is remuxed to a transport stream by `ffmpeg`, which follows the
+playlist, fetches its segments — passing the configured headers to each — and
+outputs a continuous stream. Remuxing uses `-c copy`, so there is no
+transcoding and the cost is small. HLS is detected automatically from the `.m3u8`
+in the URL; set `"remux": true` or `"remux": false` on the stream to force it.
+
+Remuxing needs `ffmpeg` on `PATH` (or set `ffmpeg_path`). It is only invoked for
+HLS streams — devices and direct streams never need it — and if a stream needs
+it and it is missing, Sourcery says so at startup.
 
 ## The probe report
 

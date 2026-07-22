@@ -24,6 +24,7 @@ import (
 	"sourcery/internal/hdhr"
 	"sourcery/internal/lineup"
 	"sourcery/internal/server"
+	"sourcery/internal/stream"
 )
 
 func main() {
@@ -68,6 +69,11 @@ func run() error {
 	}
 	if err := reachabilityError(states); err != nil {
 		return err
+	}
+
+	if cfg.UsesFFmpeg() && !stream.NewFFmpeg(cfg.FFmpegPath).Available() {
+		log.Warn("a configured stream needs ffmpeg to remux HLS, but the binary was not found; those streams will fail",
+			"ffmpeg_path", cfg.FFmpegPath)
 	}
 
 	arb := arbiter.New(states)

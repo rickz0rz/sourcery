@@ -53,9 +53,10 @@ type Mapping struct {
 // resort, used only when every physical tuner for that channel is busy. Because
 // it does not consume a tuner, it can serve when nothing else can.
 //
-// Sourcery relays the URL's bytes as-is, which works for a direct transport
-// stream but not for an HLS playlist. Headers are sent with the request, which
-// is how a stream that demands a particular Referer or User-Agent is satisfied.
+// A direct transport stream is relayed byte for byte. An HLS playlist is
+// remuxed to a transport stream by ffmpeg, which follows the playlist and
+// fetches its segments -- passing the configured headers along, which is how a
+// stream that demands a particular Referer or User-Agent is satisfied.
 type Stream struct {
 	// Channel is the presented channel number this stream backs.
 	Channel string `json:"channel"`
@@ -63,6 +64,18 @@ type Stream struct {
 	URL string `json:"url"`
 	// Headers are extra request headers, e.g. {"Referer": "https://..."}.
 	Headers map[string]string `json:"headers,omitempty"`
+	// Remux forces remuxing through ffmpeg on or off. When unset it is inferred
+	// from the URL: an HLS playlist (.m3u8) is remuxed, anything else is relayed
+	// directly.
+	Remux *bool `json:"remux,omitempty"`
+}
+
+// RemuxEnabled reports whether this stream should be remuxed through ffmpeg.
+func (s Stream) RemuxEnabled() bool {
+	if s.Remux != nil {
+		return *s.Remux
+	}
+	return strings.Contains(strings.ToLower(s.URL), ".m3u8")
 }
 
 // Source describes where a device gets its signal. It drives source
@@ -138,7 +151,21 @@ type Config struct {
 	// Streams attach external web streams as a last-resort source for a channel.
 	Streams []Stream `json:"streams,omitempty"`
 
+	// FFmpegPath is the ffmpeg binary used to remux HLS streams. Defaults to
+	// "ffmpeg", found on PATH.
+	FFmpegPath string `json:"ffmpeg_path,omitempty"`
+
 	Devices []Device `json:"devices"`
+}
+
+// UsesFFmpeg reports whether any configured stream needs ffmpeg.
+func (c *Config) UsesFFmpeg() bool {
+	for _, s := range c.Streams {
+		if s.RemuxEnabled() {
+			return true
+		}
+	}
+	return false
 }
 
 // Defaults applied when the config leaves a field unset.
@@ -147,6 +174,7 @@ const (
 	DefaultFriendlyName = "Sourcery"
 	DefaultTunerCount   = 7
 	DefaultGracePeriod  = 10 * time.Second
+	DefaultFFmpegPath   = "ffmpeg"
 )
 
 // Grace returns the configured grace period, or the default when unset.
@@ -186,6 +214,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.TunerCount == 0 {
 		c.TunerCount = DefaultTunerCount
+	}
+	if c.FFmpegPath == "" {
+		c.FFmpegPath = DefaultFFmpegPath
 	}
 }
 
